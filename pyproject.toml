@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rastrillo"
+version = "0.1.0"
+description = "Rastrillo: herramienta local y privada que rastrea tu huella digital, encuentra tus cuentas regadas por la web y las borra o anonimiza de un solo pase, dejando solo las que quieres conservar."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.44",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "jinja2>=3.1",
+    "rich>=13.7",
+    "sherlock-project>=0.15.0",
+    "holehe>=1.61",
+    # anthropic es opcional: solo se usa para el modo IA de respaldo.
+    "anthropic>=0.30",
+]
+
+[project.scripts]
+# El entrypoint vive en cli.py (raíz del repo). Ambos comandos apuntan al
+# mismo `main`; `rs` es solo un alias corto para escribir menos.
+rastrillo = "cli:main"
+rs = "cli:main"
+
+[tool.setuptools]
+# El paquete vive en rastrillo/ y cli.py es un módulo suelto en la raíz.
+packages = ["rastrillo"]
+py-modules = ["cli"]
+
+[tool.setuptools.package-data]
+rastrillo = ["recipes/*.json"]
