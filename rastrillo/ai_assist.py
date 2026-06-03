@@ -18,6 +18,7 @@ elegante (mostrar el link del directorio para clic manual).
 """
 import json
 import logging
+import os
 from typing import Callable, List, Optional
 
 from . import config
@@ -28,6 +29,58 @@ try:
     import anthropic
 except ImportError:
     anthropic = None
+
+
+# --- Heurísticas y límites del bucle ---------------------------------------
+# Keywords multi-idioma que indican que la página confirma el cierre. Si
+# detectamos URL cambiada respecto al inicio Y alguna de estas en el body,
+# damos el flujo por terminado sin esperar a que el modelo responda "done".
+_SUCCESS_KEYWORDS = (
+    # en
+    "account deleted", "successfully deleted", "your account has been deleted",
+    "account closed", "we've closed your account", "account has been closed",
+    "deactivated", "your data has been removed",
+    # es
+    "cuenta eliminada", "cuenta cerrada", "se ha eliminado",
+    "se ha cerrado", "tu cuenta ha sido eliminada",
+    # ru
+    "аккаунт удален", "учётная запись удалена", "удалено",
+    # pt-BR
+    "conta excluída", "conta encerrada", "removida",
+    # fr
+    "compte supprimé", "compte fermé", "supprimé avec succès",
+    # de
+    "konto gelöscht", "erfolgreich gelöscht", "konto geschlossen",
+    # it
+    "account eliminato", "account chiuso",
+)
+
+# Coste por llamada y techo total: si el modelo se vuelve loco con thinking
+# y consume más tokens output de los esperados, el bucle corta solo.
+_MAX_TOKENS_PER_TURN = 400
+_DEFAULT_TOKEN_BUDGET = 8000
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
+
+
+def _looks_like_success(snapshot: dict, initial_url: str) -> Optional[str]:
+    """Si la URL cambió y el body contiene alguna keyword de cierre, devuelve
+    la keyword detectada. Sino, None."""
+    cur = (snapshot.get("url") or "").lower()
+    if not cur or cur == (initial_url or "").lower():
+        return None
+    body = (snapshot.get("text") or "").lower()
+    if not body:
+        return None
+    for kw in _SUCCESS_KEYWORDS:
+        if kw in body:
+            return kw
+    return None
 
 
 # --- Disponibilidad ---------------------------------------------------------
@@ -138,16 +191,20 @@ def _ask_agent(client, goal: str, snapshot: dict, history: List[dict]) -> Option
     try:
         resp = client.messages.create(
             model=config.AI_MODEL,
-            max_tokens=400,
+            max_tokens=_MAX_TOKENS_PER_TURN,
             system=_AGENT_SYSTEM,
             messages=[{"role": "user", "content": user}],
         )
         raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return json.loads(raw)
+        # Cost: devolvemos también el conteo de tokens para que el bucle pueda
+        # llevar un presupuesto acumulado.
+        usage = getattr(resp, "usage", None)
+        used = (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0)
+        return json.loads(raw), used
     except Exception as e:
         log.warning("agente: respuesta no parseable: %s", e)
-        return None
+        return None, 0
 
 
 def _execute(page, action: dict) -> dict:
@@ -182,33 +239,85 @@ def run_agent(
     goal: str,
     max_iters: int = 8,
     on_action: Optional[Callable[[dict], None]] = None,
+    token_budget: Optional[int] = None,
 ) -> dict:
     """Conduce un flujo de borrado/anonimizado con IA. Devuelve:
-        {"outcome": "done|need_user|failed|exhausted|no_ai",
+        {"outcome": "done|need_user|failed|exhausted|exhausted_tokens|no_ai",
          "result_status": "deleted|anonymized|manual"|None,
          "reason": str,
-         "log": [acciones ejecutadas]}
+         "log": [acciones ejecutadas],
+         "tokens_used": int}
+
+    Endurecimientos:
+      - Presupuesto de tokens acumulado (default 8000, override por env
+        RASTRILLO_AI_TOKEN_BUDGET). Al excederse devuelve exhausted_tokens.
+      - Detección heurística de éxito: si la URL cambia tras una acción Y el
+        body contiene keywords multi-idioma de cierre, marca done sin un turno
+        extra.
+      - Screenshots opcionales por turno (RASTRILLO_AI_SCREENSHOTS=1) para
+        depurar flujos rotos sin perder contexto.
     """
     if not available():
         return {"outcome": "no_ai", "result_status": None,
                 "reason": "ANTHROPIC_API_KEY no definida; IA desactivada",
-                "log": []}
+                "log": [], "tokens_used": 0}
+
+    budget = token_budget if token_budget is not None else _env_int(
+        "RASTRILLO_AI_TOKEN_BUDGET", _DEFAULT_TOKEN_BUDGET)
+    take_shots = _env_int("RASTRILLO_AI_SCREENSHOTS", 0) > 0
 
     client = _client()
     history: List[dict] = []
+    tokens_used = 0
+
+    # URL inicial para detectar "cambió de página tras la acción".
+    try:
+        initial_url = page.url or ""
+    except Exception:
+        initial_url = ""
 
     for i in range(max_iters):
+        # Pre-flight: ¿agotamos el presupuesto?
+        if budget and tokens_used >= budget:
+            return {"outcome": "exhausted_tokens", "result_status": None,
+                    "reason": f"presupuesto de tokens agotado ({tokens_used}/{budget})",
+                    "log": history, "tokens_used": tokens_used}
+
         snap = _snapshot(page)
-        action = _ask_agent(client, goal, snap, history)
+
+        # Atajo: si la URL ya cambió desde el principio y vemos keywords de
+        # éxito en el body, terminamos sin gastar otro turno.
+        if i > 0:
+            kw = _looks_like_success(snap, initial_url)
+            if kw:
+                history.append({"turn": i,
+                                "action": {"action": "auto_done", "keyword": kw},
+                                "result": {"ok": True, "note": "heurística éxito"}})
+                return {"outcome": "done", "result_status": "deleted",
+                        "reason": f"heurística: URL cambió + keyword {kw!r}",
+                        "log": history, "tokens_used": tokens_used}
+
+        action, used = _ask_agent(client, goal, snap, history)
+        tokens_used += used
         if action is None:
             return {"outcome": "failed", "result_status": None,
-                    "reason": "el modelo no devolvió JSON válido", "log": history}
+                    "reason": "el modelo no devolvió JSON válido",
+                    "log": history, "tokens_used": tokens_used}
 
         kind = action.get("action")
-        log.info("agente turno %s: %s (%s)", i, kind, action.get("reason", "")[:80])
+        log.info("agente turno %s: %s (%s) tokens=%s",
+                 i, kind, action.get("reason", "")[:80], tokens_used)
         if on_action:
             try:
                 on_action(action)
+            except Exception:
+                pass
+        if take_shots:
+            try:
+                from . import config as _cfg
+                import time as _t
+                p = _cfg.SCREENSHOT_DIR / f"agent_turn_{i}_{int(_t.time())}.png"
+                page.screenshot(path=str(p))
             except Exception:
                 pass
 
@@ -216,24 +325,25 @@ def run_agent(
             history.append({"turn": i, "action": action, "result": None})
             return {"outcome": "need_user", "result_status": None,
                     "reason": action.get("reason", "intervención humana requerida"),
-                    "log": history}
+                    "log": history, "tokens_used": tokens_used}
         if kind == "done":
             history.append({"turn": i, "action": action, "result": None})
             return {"outcome": "done",
                     "result_status": action.get("outcome", "deleted"),
                     "reason": action.get("reason", ""),
-                    "log": history}
+                    "log": history, "tokens_used": tokens_used}
         if kind == "failed":
             history.append({"turn": i, "action": action, "result": None})
             return {"outcome": "failed", "result_status": None,
-                    "reason": action.get("reason", ""), "log": history}
+                    "reason": action.get("reason", ""),
+                    "log": history, "tokens_used": tokens_used}
 
         result = _execute(page, action)
         history.append({"turn": i, "action": action, "result": result})
 
     return {"outcome": "exhausted", "result_status": None,
             "reason": f"límite de {max_iters} iteraciones sin completar",
-            "log": history}
+            "log": history, "tokens_used": tokens_used}
 
 
 # --- Búsqueda web localizada (Capa 2 del resolver) -------------------------

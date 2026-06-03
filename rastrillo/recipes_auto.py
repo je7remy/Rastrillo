@@ -123,11 +123,31 @@ def synthesize_and_save(
         "message": ("Receta auto-generada por el agente IA. Confirma que la "
                     "página muestra el éxito antes de continuar."),
     })
-    steps.append({
-        "action": "verify",
-        "success_selector": "body",
-        "on_success": result_status,
-    })
+
+    # Verify heurístico: si el primer click del agente fue por CSS selector
+    # (no por texto), asumimos que ese control DESAPARECE en la página de
+    # éxito. Es una señal mucho más útil que el genérico body=presente.
+    # Si no podemos derivar nada, caemos al fallback antiguo.
+    first_click_sel = next(
+        (s["selector"] for s in steps
+         if s.get("action") == "click"
+         and s.get("selector")
+         and not s["selector"].startswith("text=")),
+        None,
+    )
+    if first_click_sel:
+        verify_step = {
+            "action": "verify",
+            "expect_gone": first_click_sel,
+            "on_success": result_status,
+        }
+    else:
+        verify_step = {
+            "action": "verify",
+            "success_selector": "body",
+            "on_success": result_status,
+        }
+    steps.append(verify_step)
 
     recipe = {
         "platform": slug,

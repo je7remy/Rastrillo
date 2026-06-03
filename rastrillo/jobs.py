@@ -16,6 +16,7 @@ Invariantes que respeta este módulo:
 - La pausa humana es OBLIGATORIA: el motor llama a `web_pause_handler`, que
   bloquea hasta que el humano confirme desde la UI.
 """
+import json
 import logging
 import queue
 import threading
@@ -110,16 +111,65 @@ def queue_size() -> int:
 
 
 # --- Escaneo asíncrono -------------------------------------------------------
+def _auto_resolve_pending() -> int:
+    """Tras discovery, prepara la Resolution de cada cuenta no-keep que no
+    tenga receta. La persiste en `action_meta` y `profile_url`, pero NO toca
+    el status: la cuenta sigue `found` hasta que el usuario haga triage
+    (es un trabajo informativo, no destructivo, así que no requiere owned).
+
+    Devuelve cuántas cuentas se enriquecieron.
+    """
+    # Imports diferidos para no crear ciclos con resolver -> ai_assist -> config.
+    from . import resolver as _resolver
+    from .recipes import get_recipe
+
+    n = 0
+    for row in db.list_accounts(status="found"):
+        if get_recipe(row["platform"]):
+            continue   # ya tiene ruta determinista
+        if row["action_meta"]:
+            continue   # ya tiene Resolution previa
+        host = row["source_site"] or row["platform"]
+        if not host:
+            continue
+        try:
+            res = _resolver.resolve(host, row["identifier"] or "")
+        except Exception as e:
+            log.warning("auto-resolver(%s) falló: %s", host, e)
+            continue
+        try:
+            db.update_account(
+                row["id"],
+                action_meta=json.dumps(res.to_meta(), ensure_ascii=False),
+            )
+            if res.url:
+                db.update_account(row["id"], profile_url=res.url)
+            n += 1
+        except Exception as e:
+            log.warning("auto-resolver guardado fallo acc=%s: %s", row["id"], e)
+    log.info("auto-resolver: %s cuentas enriquecidas", n)
+    return n
+
+
 def scan_async(usernames, emails) -> None:
-    """Lanza Sherlock+Holehe en un thread aparte para no bloquear el servidor."""
+    """Lanza Sherlock+Holehe en un thread aparte para no bloquear el servidor.
+    Después corre auto-resolver para que cada cuenta llegue al dashboard con
+    su plan ya calculado.
+    """
     def _run():
         with _lock:
             _scan_status["running"] = True
+            _scan_status["phase"] = "discovery"
+            _scan_status["resolved"] = 0
         try:
             summary = discover(usernames or [], emails or [])
             with _lock:
                 _scan_status["last"] = summary
-            log.info("scan completado: %s", summary)
+                _scan_status["phase"] = "resolving"
+            n = _auto_resolve_pending()
+            with _lock:
+                _scan_status["resolved"] = n
+            log.info("scan completado: %s | auto-resolver=%s", summary, n)
         except Exception as e:
             log.exception("scan falló")
             with _lock:
@@ -127,6 +177,7 @@ def scan_async(usernames, emails) -> None:
         finally:
             with _lock:
                 _scan_status["running"] = False
+                _scan_status["phase"] = None
 
     threading.Thread(target=_run, daemon=True, name="rastrillo-scan").start()
 
