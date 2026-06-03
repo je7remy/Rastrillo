@@ -110,3 +110,23 @@ anonimizado. Los selectores son **puntos de partida sin verificar contra el siti
 ## Cómo probar sin tocar sitios reales
 Monta un HTML local con un botón "Delete account" y un `success` final; apunta una
 receta de prueba a `http://localhost:PORT`. Así validas el motor de forma determinista.
+
+## Tests
+Suite con `unittest` (sin deps nuevas):
+
+    cd c:\account-nuker
+    .venv\Scripts\python -m unittest discover -t . -s tests -v
+
+Cada test usa un `RASTRILLO_HOME` propio en tempdir, con `RASTRILLO_TOKEN=test-token`
+y sin `ANTHROPIC_API_KEY`/`RASTRILLO_HIBP_API_KEY`. Estructura:
+
+- `tests/test_upsert_dedup.py` — Reddit/RedditGifts NO se colapsan; no UNIQUE en SQL.
+- `tests/test_resolver_layers.py` — orden de capas + caché + force_refresh.
+- `tests/test_gdpr_templates.py` — 6 idiomas iniciales + follow-up; detección por TLD.
+- `tests/test_state_transitions.py` — preflight, mark-sent, triage, dry-run,
+  process-all-auto, token middleware.
+- `tests/test_degradation_no_ai.py` — sin API key NINGUNA cuenta queda sin acción.
+- `tests/test_engine_html_local.py` — servidor HTTP local + FakePage; resumibilidad,
+  hash de receta, recetas auto-generadas omiten `fill`.
+
+Antes de cerrar un cambio: corre la suite. Es rápido (~10 s).

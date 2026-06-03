@@ -17,6 +17,10 @@ USER_RECIPES = BASE_DIR / "recipes"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 AI_MODEL = os.environ.get("RASTRILLO_AI_MODEL", "claude-sonnet-4-6")
 
+# HaveIBeenPwned (opcional). Sin clave se omite la fuente "hibp" en discovery.
+# La API key se obtiene en https://haveibeenpwned.com/API/Key (~3-4 USD/mes).
+HIBP_API_KEY = os.environ.get("RASTRILLO_HIBP_API_KEY")
+
 # Plataformas que NUNCA se tocan (las profesionales que quieres conservar)
 KEEP_PLATFORMS = {"tiktok", "instagram", "linkedin", "github"}
 

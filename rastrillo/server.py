@@ -277,6 +277,79 @@ def api_own(account_id: int, body: OwnBody):
     return {"ok": True, "owned": False, "status": "not_mine"}
 
 
+@app.post("/api/accounts/process-all-auto")
+def api_process_all_auto():
+    """Encola todas las cuentas confirmadas como mías (owned=1) en estado
+    'found' cuyo camino sea automatizable:
+      - hay receta JSON para su platform, O
+      - el resolver devuelve kind='auto' (directorio + IA disponible).
+
+    Las cuentas semi_auto / email_draft de la resolución se persisten en su
+    estado correspondiente para que las gestiones uno a uno desde "Tu turno".
+
+    Respeta dry-run y graba audit por cada acción destructiva.
+    """
+    dry_run = config.DRY_RUN
+    summary = {
+        "ok": True, "dry_run": dry_run,
+        "queued": 0, "semi_auto": 0, "email_draft": 0,
+        "skipped_unowned": 0, "skipped_status": 0,
+        "visited": 0,
+    }
+    for row in db.list_accounts():
+        if row["status"] != "found":
+            summary["skipped_status"] += 1
+            continue
+        if not row["owned"]:
+            summary["skipped_unowned"] += 1
+            continue
+        summary["visited"] += 1
+        # Receta: ruta determinista; encolar directamente.
+        if get_recipe(row["platform"]):
+            audit.record("delete", row, dry_run=dry_run,
+                         extra={"via": "process_all_auto", "route": "recipe"})
+            if dry_run:
+                db.set_status(row["id"], "dry_run",
+                              f"[simulación] batch: receta '{row['platform']}'")
+            else:
+                db.update_account(row["id"], current_step=0)
+                jobs.enqueue_for_run(row["id"], reason="process_all_auto (receta)")
+                summary["queued"] += 1
+            continue
+        # Sin receta: probamos resolver. Solo encolamos si kind=auto.
+        host = row["source_site"] or row["platform"]
+        try:
+            res = resolver.resolve(host, row["identifier"] or "")
+        except Exception as e:
+            db.log(row["id"], "warn", f"process_all_auto resolver falló: {e}")
+            continue
+        # Persistimos la Resolution siempre.
+        db.update_account(row["id"], action_meta=json.dumps(res.to_meta(), ensure_ascii=False))
+        if res.url:
+            db.update_account(row["id"], profile_url=res.url)
+        if res.kind == "auto":
+            audit.record("delete", row, dry_run=dry_run,
+                         extra={"via": "process_all_auto", "route": "resolver",
+                                "layer": res.layer})
+            if dry_run:
+                db.set_status(row["id"], "dry_run",
+                              f"[simulación] batch: kind=auto layer={res.layer}")
+            else:
+                db.update_account(row["id"], current_step=0)
+                jobs.enqueue_for_run(row["id"], reason=f"process_all_auto/{res.layer}")
+                summary["queued"] += 1
+        elif res.kind == "semi_auto":
+            msg = f"{res.title}\n{res.notes}\nEnlace: {res.url}".strip()
+            db.set_status(row["id"], "semi_auto", msg)
+            summary["semi_auto"] += 1
+        elif res.kind == "email_draft":
+            msg = (f"{res.title}\n{res.notes}\n"
+                   f"Para: {res.email_to}\nAsunto: {res.email_subject}").strip()
+            db.set_status(row["id"], "email_draft", msg)
+            summary["email_draft"] += 1
+    return summary
+
+
 @app.post("/api/accounts/discard-low")
 def api_discard_low():
     """Bulk: descarta como 'not_mine' todas las cuentas en estado 'found' con
@@ -289,6 +362,97 @@ def api_discard_low():
             audit.record("discard", r, extra={"via": "bulk_low"})
             n += 1
     return {"ok": True, "discarded": n}
+
+
+_FOLLOWUP_PREFIX = {
+    "en": ("Follow-up: pending GDPR Article 17 erasure request",
+           "Dear Privacy Team,\n\nOn {sent_iso} I sent a formal request for "
+           "the erasure of all my personal data and account on {host} "
+           "({identifier}). It has been {days} days since the request and I "
+           "have not received confirmation of completion.\n\nUnder GDPR "
+           "Article 12(3) you are required to respond within one month. "
+           "Please provide written confirmation that my data has been deleted "
+           "or explain in writing why the deadline cannot be met.\n\n"
+           "--- Original request below ---\n\n"),
+    "es": ("Seguimiento: solicitud de supresión (RGPD Art. 17) pendiente",
+           "Estimado equipo de privacidad:\n\nEl {sent_iso} envié una "
+           "solicitud formal de supresión de todos mis datos personales y "
+           "cuenta asociada en {host} ({identifier}). Han pasado {days} días "
+           "desde la solicitud y no he recibido confirmación.\n\n"
+           "El Artículo 12.3 del RGPD obliga a responder en el plazo de un "
+           "mes. Les ruego confirmen por escrito que se han eliminado mis "
+           "datos o expliquen por qué no es posible cumplir el plazo.\n\n"
+           "--- Solicitud original abajo ---\n\n"),
+    "ru": ("Напоминание: запрос на удаление данных (ст. 17 GDPR) без ответа",
+           "Здравствуйте,\n\n{sent_iso} я отправил(а) официальный запрос на "
+           "удаление всех моих персональных данных и учётной записи на "
+           "{host} ({identifier}). С момента запроса прошло {days} дней, "
+           "подтверждения не получено.\n\nСогласно статье 12(3) GDPR ответ "
+           "обязателен в течение одного месяца. Прошу подтвердить удаление "
+           "данных в письменном виде.\n\n--- Исходный запрос ниже ---\n\n"),
+    "pt-BR": ("Acompanhamento: solicitação de exclusão (LGPD/RGPD Art. 17)",
+              "Prezada equipe de Privacidade,\n\nEm {sent_iso} enviei uma "
+              "solicitação formal de exclusão de meus dados em {host} "
+              "({identifier}). Já se passaram {days} dias sem confirmação.\n\n"
+              "Solicito a confirmação por escrito da exclusão dos dados.\n\n"
+              "--- Solicitação original abaixo ---\n\n"),
+    "fr": ("Relance : demande d'effacement (RGPD Art. 17) sans réponse",
+           "Madame, Monsieur,\n\nLe {sent_iso} j'ai envoyé une demande "
+           "d'effacement de mes données et compte sur {host} ({identifier}). "
+           "{days} jours se sont écoulés sans réponse.\n\nL'article 12.3 du "
+           "RGPD vous impose un délai d'un mois. Veuillez me confirmer par "
+           "écrit l'effacement.\n\n--- Demande originale ci-dessous ---\n\n"),
+    "de": ("Erinnerung: Löschungsantrag (DSGVO Art. 17) ohne Antwort",
+           "Sehr geehrtes Datenschutzteam,\n\nam {sent_iso} habe ich einen "
+           "Antrag auf vollständige Löschung meiner Daten auf {host} "
+           "({identifier}) gestellt. Seitdem sind {days} Tage vergangen ohne "
+           "Bestätigung.\n\nNach Art. 12 Abs. 3 DSGVO ist eine Antwort "
+           "innerhalb eines Monats verpflichtend. Bitte bestätigen Sie die "
+           "Löschung schriftlich.\n\n--- Ursprünglicher Antrag unten ---\n\n"),
+}
+
+
+@app.get("/api/accounts/{account_id}/followup-draft")
+def api_followup_draft(account_id: int):
+    """Genera un borrador de seguimiento para una cuenta en user_done cuyo
+    plazo GDPR (30 días) está vencido. Reutiliza el borrador original que ya
+    guardamos en action_meta y le prepende un párrafo de urgencia localizado.
+    """
+    import time as _t
+    acc = db.get_account(account_id)
+    if not acc:
+        raise HTTPException(404, "Cuenta no encontrada.")
+    if not acc["sent_at"]:
+        raise HTTPException(409, "Esta cuenta no tiene fecha de envío registrada.")
+    if not acc["action_meta"]:
+        raise HTTPException(409, "No tengo el borrador original para esta cuenta.")
+    try:
+        meta = json.loads(acc["action_meta"])
+    except Exception:
+        raise HTTPException(500, "action_meta corrupto.")
+    if not meta.get("email_to"):
+        raise HTTPException(409, "El borrador original no es por correo.")
+
+    lang = meta.get("language") or "en"
+    tpl = _FOLLOWUP_PREFIX.get(lang) or _FOLLOWUP_PREFIX["en"]
+    sent_at = float(acc["sent_at"])
+    days = max(0, int((_t.time() - sent_at) // 86400))
+    sent_iso = _t.strftime("%Y-%m-%d", _t.gmtime(sent_at))
+    host = acc["source_site"] or acc["platform"] or ""
+    identifier = acc["identifier"] or ""
+
+    prefix = tpl[1].format(sent_iso=sent_iso, days=days, host=host, identifier=identifier)
+    new_subject = tpl[0]
+    new_body = prefix + (meta.get("email_body") or "")
+    return {
+        "email_to": meta["email_to"],
+        "email_subject": new_subject,
+        "email_body": new_body,
+        "language": lang,
+        "days_since_sent": days,
+        "host": host,
+        "identifier": identifier,
+    }
 
 
 @app.get("/api/accounts/{account_id}/resolution")
@@ -345,9 +509,16 @@ def api_mark_sent(account_id: int, body: ActionBody = ActionBody(action="mark-se
                       f"[simulación] habría marcado como enviada a {email_to or '?'}")
         return {"ok": True, "status": "dry_run", "dry_run": True}
 
-    audit.record("mark_sent", acc)
+    # Si la cuenta venía de email_draft, registramos cuándo se envió (para el
+    # seguimiento GDPR: el plazo legal en la UE es 30 días).
+    sent_at = None
+    if acc["status"] == "email_draft":
+        import time as _t
+        sent_at = _t.time()
+        db.update_account(account_id, sent_at=sent_at)
+    audit.record("mark_sent", acc, extra={"sent_at": sent_at})
     db.set_status(account_id, "user_done", "Marcada como tramitada por el usuario.")
-    return {"ok": True, "status": "user_done"}
+    return {"ok": True, "status": "user_done", "sent_at": sent_at}
 
 
 @app.post("/api/accounts/clear")
@@ -355,6 +526,83 @@ def api_clear_accounts():
     """Vacía la tabla. Permite empezar un escaneo nuevo sin acumulado previo."""
     db.clear_accounts()
     return {"ok": True}
+
+
+# --- Informe / export -------------------------------------------------------
+@app.get("/api/report")
+def api_report(format: str = "json"):
+    """Genera un informe completo de la sesión actual.
+
+    format=json (default) → JSON con cuentas + resumen.
+    format=csv             → CSV con una fila por cuenta.
+
+    No incluye el cuerpo completo de los correos para no inflar el archivo;
+    incluye sí los destinatarios y asuntos. La consulta completa al audit
+    vive en `~/.rastrillo/audit.json`.
+    """
+    import csv as _csv
+    import io
+    import time as _t
+    from fastapi.responses import PlainTextResponse, Response
+
+    rows = [dict(r) for r in db.list_accounts()]
+    now = _t.time()
+    enriched = []
+    for r in rows:
+        meta = None
+        if r.get("action_meta"):
+            try:
+                meta = json.loads(r["action_meta"])
+            except Exception:
+                meta = None
+        days_since_sent = None
+        if r.get("sent_at"):
+            days_since_sent = int((now - float(r["sent_at"])) // 86400)
+        enriched.append({
+            **r,
+            "days_since_sent": days_since_sent,
+            "resolver_layer": (meta or {}).get("layer"),
+            "resolver_kind":  (meta or {}).get("kind"),
+            "email_to":       (meta or {}).get("email_to"),
+            "email_subject":  (meta or {}).get("email_subject"),
+        })
+
+    if format == "csv":
+        out = io.StringIO()
+        cols = ["id", "platform", "display_name", "source", "source_site",
+                "identifier", "profile_url", "status", "confidence", "owned",
+                "deletion_type", "difficulty", "resolver_layer",
+                "resolver_kind", "email_to", "email_subject",
+                "updated_at", "sent_at", "days_since_sent", "last_message"]
+        w = _csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in enriched:
+            w.writerow(r)
+        body = out.getvalue()
+        ts = _t.strftime("%Y%m%d-%H%M%S", _t.gmtime(now))
+        return Response(
+            content=body,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="rastrillo-{ts}.csv"'},
+        )
+
+    # JSON por defecto, con resumen agregado.
+    stats = db.stats()
+    audit_entries = audit.read_all()
+    by_action = {}
+    for a in audit_entries:
+        by_action[a["action"]] = by_action.get(a["action"], 0) + 1
+    return {
+        "generated_at": now,
+        "generated_at_iso": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(now)),
+        "summary": {
+            "total":         len(enriched),
+            "by_status":     stats,
+            "audit_actions": by_action,
+            "audit_total":   len(audit_entries),
+        },
+        "accounts": enriched,
+    }
 
 
 # --- Dry-run global ----------------------------------------------------------
@@ -864,6 +1112,12 @@ button:focus-visible,
     <button id="dir-refresh" class="btn btn-icon btn-ghost"
             aria-label="Refrescar directorio"
             title="Refrescar directorio"></button>
+    <a id="report-btn" class="btn btn-sm btn-ghost"
+       href="/api/report?format=csv" download
+       title="Descargar informe CSV con todas las cuentas">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+      Informe
+    </a>
     <button id="theme-toggle" class="btn btn-icon btn-ghost"
             aria-label="Cambiar tema"
             title="Cambiar entre modo claro y oscuro"></button>
@@ -915,11 +1169,18 @@ button:focus-visible,
         <button class="filter on" id="f-all"       data-f="all"       onclick="setFilter('all')"       role="tab">Todas</button>
         <button class="filter"    id="f-triage"    data-f="triage"    onclick="setFilter('triage')"    role="tab">Triage</button>
         <button class="filter"    id="f-pending"   data-f="pending"   onclick="setFilter('pending')"   role="tab">Pendientes</button>
+        <button class="filter"    id="f-your_turn" data-f="your_turn" onclick="setFilter('your_turn')" role="tab">Tu turno</button>
         <button class="filter"    id="f-action"    data-f="action"    onclick="setFilter('action')"    role="tab">Acción</button>
         <button class="filter"    id="f-done"      data-f="done"      onclick="setFilter('done')"      role="tab">Completadas</button>
         <button class="filter"    id="f-kept"      data-f="kept"      onclick="setFilter('kept')"      role="tab">Conservadas</button>
         <button class="filter"    id="f-discarded" data-f="discarded" onclick="setFilter('discarded')" role="tab">Descartadas</button>
       </div>
+      <button id="process-all-btn" class="btn btn-sm btn-accent"
+              onclick="askProcessAllAuto()"
+              title="Encola todas las cuentas confirmadas como tuyas cuyo flujo es automatizable">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l3 3 5-5"/><path d="M11 12l3 3 7-7"/></svg>
+        <span id="process-all-label">Procesar automáticas</span>
+      </button>
       <!-- visibilidad controlada por JS según filtro activo -->
       <button id="bulk-low-btn" class="btn btn-sm btn-ghost"
               onclick="discardLowConfidence()"
@@ -969,6 +1230,7 @@ const CONF_LABEL={ high:"Confianza alta", medium:"Confianza media", low:"Confian
  */
 const GROUPS={
   pending  :["queued","in_progress"],
+  your_turn:["semi_auto","email_draft","awaiting_user"],   /* 1 clic / 1 envío / 1 confirmación */
   action   :["semi_auto","email_draft","awaiting_user","manual","failed"],
   done     :["deleted","anonymized","user_done","dry_run"],
   kept     :["skipped"],
@@ -1119,6 +1381,16 @@ function actionsFor(a){
     return btnHtml("Reintentar","retry",id)
          + btnHtml("Conservar","keep",id,{cls:"btn-ghost"});
   }
+  if(a.status==="user_done"){
+    // Si pasaron 30+ días desde el envío sin respuesta, ofrecemos un
+    // borrador de seguimiento (GDPR Art. 12.3: respuesta exigible en 30 días).
+    const days = a.sent_at ? Math.floor((Date.now()/1000 - a.sent_at)/86400) : 0;
+    const followup = (a.sent_at && days >= 30)
+      ? `<button class="btn btn-sm btn-warn" onclick="openFollowup(${a.id})">${ic("mail")}Seguimiento</button>`
+      : "";
+    return followup
+      + btnHtml("Reintentar","retry",id,{cls:"btn-ghost"});
+  }
   if(a.status==="deleted"||a.status==="anonymized"||a.status==="skipped"){
     return btnHtml("Reintentar","retry",id,{cls:"btn-ghost"});
   }
@@ -1133,6 +1405,17 @@ function renderRow(a){
   const link=a.profile_url
     ? `<span class="dot">·</span><a href="${escapeAttr(a.profile_url)}" target="_blank" rel="noreferrer">perfil</a>`
     : "";
+  // Seguimiento GDPR: si la cuenta tiene sent_at, calculamos días + estado
+  let sent="";
+  if(a.sent_at){
+    const days=Math.floor((Date.now()/1000 - a.sent_at)/86400);
+    const overdue = days >= 30;
+    const tone = overdue ? "danger" : "info";
+    const label = overdue
+      ? `Vencida (${days}d)`
+      : `Enviada hace ${days}d`;
+    sent = `<span class="dot">·</span><span class="badge ${tone}" title="GDPR: respuesta exigible en 30 días">${label}</span>`;
+  }
   const msg=SHOW_MSG.has(a.status) && a.last_message
     ? `<div class="row-msg">${linkify(escapeHtml(a.last_message))}</div>` : "";
   // Indicador de confianza: solo lo mostramos cuando NO está confirmada como
@@ -1148,7 +1431,7 @@ function renderRow(a){
     ${avatarFor(a)}
     <div class="row-main">
       <div class="row-title">${escapeHtml(a.display_name||a.platform)}${ownedMark}</div>
-      <div class="row-meta">${id}${site}${link}</div>
+      <div class="row-meta">${id}${site}${link}${sent}</div>
     </div>
     ${conf}
     ${badgeFor(a)}
@@ -1190,18 +1473,48 @@ async function discardLowConfidence(){
   });
 }
 
+function askProcessAllAuto(){
+  showConfirm({
+    title:"Procesar todo lo automatizable",
+    body:"Vas a encolar TODAS las cuentas confirmadas como tuyas que tengan "
+        +"receta o resolver kind=auto. Las que necesiten tu input (semi_auto, "
+        +"email_draft) se prepararán para que las gestiones desde 'Tu turno'.\n\n"
+        +"Si Simulación está activada, ninguna acción destructiva ocurrirá: solo "
+        +"verás qué habría pasado.",
+    danger:false, confirmLabel:"Procesar",
+    onYes: async ()=>{
+      try{
+        const r=await postJSON("/api/accounts/process-all-auto",{});
+        const parts = [];
+        if(r.queued)      parts.push(`${r.queued} encoladas`);
+        if(r.semi_auto)   parts.push(`${r.semi_auto} a "Tu turno" (1 clic)`);
+        if(r.email_draft) parts.push(`${r.email_draft} a "Tu turno" (correo)`);
+        if(!parts.length) parts.push("nada nuevo");
+        const dr = r.dry_run ? " · [simulación]" : "";
+        toast(`Procesado: ${parts.join(", ")}${dr}`, 4500);
+      } catch(e){ toast(e.message, 7000, "err"); }
+      load();
+    },
+  });
+}
+
 /* ── Stats ───────────────────────────────────────────── */
 function computeStats(stats, accounts){
   const sum=k=>k.reduce((n,x)=>n+(stats[x]||0),0);
-  const triage = (accounts||[]).filter(a=>a.status==="found" && !a.owned).length;
+  const acc = accounts || [];
+  const triage = acc.filter(a=>a.status==="found" && !a.owned).length;
+  const owned_found = acc.filter(a=>a.status==="found" && a.owned).length;
   return {
     total:     sum(Object.keys(stats)),
     triage:    triage,
-    pending:   sum(GROUPS.pending) + ((accounts||[]).filter(a=>a.status==="found" && a.owned).length),
+    pending:   sum(GROUPS.pending) + owned_found,
+    your_turn: sum(GROUPS.your_turn),
     action:    sum(GROUPS.action),
     done:      sum(GROUPS.done),
     kept:      sum(GROUPS.kept),
     discarded: sum(GROUPS.discarded),
+    /* Candidatas a "Procesar todo automatizable": owned=1 y status=found. */
+    automatable: owned_found,
   };
 }
 function renderStats(s){
@@ -1353,6 +1666,31 @@ async function openDraft(id){
     + "&body="   +encodeURIComponent(meta.email_body||"");
   showDraftModal(meta, mailto);
 }
+
+async function openFollowup(id){
+  let data;
+  try{
+    const r = await fetch(`/api/accounts/${id}/followup-draft`);
+    if(!r.ok){
+      const d=await r.json().catch(()=>({}));
+      toast(d.detail || "No pude generar el seguimiento", 6000, "err");
+      return;
+    }
+    data = await r.json();
+  } catch(e){ toast("Error generando seguimiento", 5000, "err"); return; }
+  // Reusamos el mismo modal. data ya viene con email_to/subject/body listos.
+  const mailto="mailto:"+encodeURIComponent(data.email_to)
+    + "?subject="+encodeURIComponent(data.email_subject||"")
+    + "&body="   +encodeURIComponent(data.email_body||"");
+  showDraftModal({
+    title: `Seguimiento GDPR · ${data.host} (${data.days_since_sent}d sin respuesta)`,
+    email_to: data.email_to,
+    email_subject: data.email_subject,
+    email_body: data.email_body,
+    notes: "Envío de seguimiento basado en la solicitud original. "
+         + "GDPR Art. 12.3: respuesta exigible en un mes.",
+  }, mailto);
+}
 function showDraftModal(meta, mailto){
   const m=$("modal");
   m.innerHTML=`<div class="modal" role="document">
@@ -1446,6 +1784,7 @@ async function load(){
     $("f-all").textContent=`Todas · ${stats.total - stats.discarded}`;
     $("f-triage").textContent=`Triage · ${stats.triage}`;
     $("f-pending").textContent=`Pendientes · ${stats.pending}`;
+    $("f-your_turn").textContent=`Tu turno · ${stats.your_turn}`;
     $("f-action").textContent=`Acción · ${stats.action}`;
     $("f-done").textContent=`Completadas · ${stats.done}`;
     $("f-kept").textContent=`Conservadas · ${stats.kept}`;
@@ -1454,6 +1793,9 @@ async function load(){
     $("clear-btn").disabled = stats.total === 0;
     // El bulk "descartar low" aparece SOLO en triage.
     $("bulk-low-btn").style.display = (CURRENT_FILTER==="triage" && stats.triage>0) ? "" : "none";
+    // Botón "Procesar automáticas" muestra el contador y se deshabilita en cero.
+    $("process-all-label").textContent = `Procesar automáticas · ${stats.automatable}`;
+    $("process-all-btn").disabled = stats.automatable === 0;
 
     // Lista
     const filtered=filterAccounts(accRes.accounts||[]);

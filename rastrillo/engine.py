@@ -22,7 +22,7 @@ import time
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from . import config, db, ai_assist, resolver
+from . import config, db, ai_assist, resolver, recipes_auto
 from .recipes import get_recipe
 
 ADJ = ["azul", "lento", "gris", "vacio", "mudo", "lejano", "anonimo"]
@@ -167,12 +167,19 @@ class Engine:
                 status = result2.get("result_status") or "deleted"
                 db.set_status(account_id, status, f"verificado por IA: {reason}")
                 self._shot(page, account_id, "final")
+                # Aprendizaje: el agente cerró el flujo → serializamos la
+                # secuencia como receta para que la próxima sea determinista.
+                # Combinamos el log del primer intento + el del rerun post-pausa.
+                full_log = list(result.get("log") or []) + list(result2.get("log") or [])
+                self._save_synthesized_recipe(account_id, host, url, full_log, status)
                 return
 
         if outcome == "done":
             status = result.get("result_status") or "deleted"
             db.set_status(account_id, status, f"verificado por IA: {reason}")
             self._shot(page, account_id, "final")
+            self._save_synthesized_recipe(account_id, host, url,
+                                          result.get("log") or [], status)
             return
 
         # Degradación a `semi_auto` (no a 'manual sin acción'): el usuario ve
@@ -194,6 +201,19 @@ class Engine:
             db.update_account(account_id, current_step=0, recipe_hash=h)
         elif not prev:
             db.update_account(account_id, recipe_hash=h)
+
+    def _save_synthesized_recipe(self, account_id, host, url, agent_log, status):
+        """Si el agente cerró el flujo, persistimos la secuencia como receta
+        determinista en ~/.rastrillo/recipes/. Es best-effort: cualquier fallo
+        se loggea pero no rompe el motor."""
+        try:
+            res = recipes_auto.synthesize_and_save(host, url, agent_log, status)
+            if res:
+                path, _recipe = res
+                db.log(account_id, "info",
+                       f"receta auto-generada guardada en {path.name}")
+        except Exception as e:
+            db.log(account_id, "warn", f"no pude guardar receta auto-generada: {e}")
 
     def _run_steps(self, account_id, recipe, page):
         steps = recipe.get("steps", [])
@@ -290,19 +310,74 @@ class Engine:
             self.pause_handler(account_id, f"El control sugerido falló. Haz tú: '{step['goal']}'.")
 
     def _verify(self, account_id, page, step):
+        """Verifica el cierre del flujo. Combina hasta 4 criterios; todos los
+        que estén presentes deben pasar (AND).
+
+          success_selector: CSS que DEBE estar presente tras la acción
+          success_url     : URL (subcadena, normalizada minúsculas) que DEBE
+                            coincidir con la URL final
+          success_text    : substring (case-insensitive) presente en el body
+          expect_gone     : selector que NO debe existir (login form re-aparece,
+                            perfil dejó de cargarse, etc.)
+
+        Si no hay ningún criterio, asumimos éxito y dejamos `manual` con un
+        aviso para que el humano revise (compatible con recetas viejas).
+        """
+        checks = []
         sel = step.get("success_selector")
-        ok = True
+        url_expect = step.get("success_url")
+        text_expect = step.get("success_text")
+        gone = step.get("expect_gone")
+
         if sel:
             try:
                 page.wait_for_selector(sel, timeout=8000)
+                checks.append(("success_selector", True, sel))
             except PWTimeout:
-                ok = False
+                checks.append(("success_selector", False, sel))
+
+        if url_expect:
+            try:
+                cur_url = (page.url or "").lower()
+            except Exception:
+                cur_url = ""
+            ok_url = url_expect.lower() in cur_url
+            checks.append(("success_url", ok_url, url_expect))
+
+        if text_expect:
+            try:
+                body_text = (page.inner_text("body") or "").lower()
+            except Exception:
+                body_text = ""
+            ok_text = text_expect.lower() in body_text
+            checks.append(("success_text", ok_text, text_expect))
+
+        if gone:
+            # `query_selector` devuelve None si no existe; pasa el check.
+            try:
+                exists = page.query_selector(gone) is not None
+            except Exception:
+                exists = False   # error consultando = asumimos que no está
+            checks.append(("expect_gone", not exists, gone))
+
         self._shot(page, account_id, "final")
-        if ok:
-            db.set_status(account_id, step.get("on_success", "deleted"), "verificado")
+
+        if not checks:
+            db.set_status(account_id, "manual",
+                          "No tenías criterios de verificación en la receta; "
+                          "revisa el screenshot/log para confirmar.")
+            return
+
+        all_ok = all(c[1] for c in checks)
+        detail = ", ".join(f"{name}={'ok' if ok else 'fail'} ({val!r})"
+                           for name, ok, val in checks)
+        if all_ok:
+            db.set_status(account_id, step.get("on_success", "deleted"),
+                          f"verificado: {detail}")
         else:
             db.set_status(account_id, "manual",
-                          "No pude verificar el borrado. Revisa el screenshot/log.")
+                          f"No pude verificar el borrado ({detail}). "
+                          "Revisa el screenshot/log.")
 
     def _shot(self, page, account_id, tag):
         try:

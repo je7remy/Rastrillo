@@ -32,7 +32,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import db, config
+from . import db, config, hibp
 from .recipes import load_recipes
 
 log = logging.getLogger("rastrillo.discovery")
@@ -326,8 +326,8 @@ def discover(usernames, emails):
     recipes = load_recipes()
     summary = {
         "found": 0, "kept": 0, "no_recipe": [], "errors": [],
-        "raw_counts": {"sherlock": 0, "holehe": 0,
-                       "sherlock_saved": 0, "holehe_saved": 0},
+        "raw_counts": {"sherlock": 0, "holehe": 0, "hibp": 0,
+                       "sherlock_saved": 0, "holehe_saved": 0, "hibp_saved": 0},
     }
 
     def _register(hit, identifier, source):
@@ -344,6 +344,10 @@ def discover(usernames, emails):
         # Score de confianza (sherlock genera falsos positivos)
         if source == "holehe":
             confidence = _holehe_confidence()
+        elif source == "hibp":
+            # HIBP: el email apareció en una brecha confirmada de ese dominio.
+            # El identificador es único; confianza alta.
+            confidence = "high"
         elif source == "sherlock":
             confidence = _sherlock_confidence(identifier, hit)
         else:
@@ -418,16 +422,31 @@ def discover(usernames, emails):
             if _register(h, e, "holehe"):
                 summary["raw_counts"]["holehe_saved"] += 1
 
+        # HIBP: solo si el usuario configuró su API key. Sin key skip silencioso.
+        hibp_result = hibp.run_hibp(e)
+        if hibp_result.get("skipped"):
+            continue
+        summary["raw_counts"]["hibp"] += hibp_result["raw_count"]
+        if hibp_result.get("error"):
+            summary["errors"].append(
+                {"source": "hibp", "id": e, "error": hibp_result["error"]}
+            )
+        for h in hibp_result["hits"]:
+            if _register(h, e, "hibp"):
+                summary["raw_counts"]["hibp_saved"] += 1
+
     rc = summary["raw_counts"]
     log.info(
-        "discover: sherlock %s crudo -> %s guardado | holehe %s crudo -> %s guardado | errores %s",
+        "discover: sherlock %s->%s | holehe %s->%s | hibp %s->%s | errores %s",
         rc["sherlock"], rc["sherlock_saved"],
         rc["holehe"], rc["holehe_saved"],
+        rc["hibp"], rc["hibp_saved"],
         len(summary["errors"]),
     )
     print(
-        f"[discover] sherlock {rc['sherlock']} crudo -> {rc['sherlock_saved']} guardado | "
-        f"holehe {rc['holehe']} crudo -> {rc['holehe_saved']} guardado | "
+        f"[discover] sherlock {rc['sherlock']}→{rc['sherlock_saved']} | "
+        f"holehe {rc['holehe']}→{rc['holehe_saved']} | "
+        f"hibp {rc['hibp']}→{rc['hibp_saved']} | "
         f"errores {len(summary['errors'])}"
     )
     return summary
