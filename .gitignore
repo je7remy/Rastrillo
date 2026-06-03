@@ -1,0 +1,24 @@
+@"
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Entorno virtual
+.venv/
+
+# Datos locales de Rastrillo (si alguna vez quedan dentro del repo)
+.rastrillo/
+*.db
+
+# Artefactos de prueba
+_smoke_*.py
+rastrillo-*.pdf
+rastrillo-*.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+"@ | Set-Content -Encoding utf8 .gitignore
