@@ -22,7 +22,7 @@ import time
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from . import config, db, ai_assist
+from . import config, db, ai_assist, resolver
 from .recipes import get_recipe
 
 ADJ = ["azul", "lento", "gris", "vacio", "mudo", "lejano", "anonimo"]
@@ -57,17 +57,59 @@ class Engine:
         input("     Cuando termines en el navegador, presiona ENTER para continuar...")
 
     def run_account(self, account_id):
+        """Procesa una cuenta. Caminos:
+
+        1. Receta JSON (override): si existe receta para `acc.platform`, se usa
+           tal cual — es el modo más fiable.
+        2. Sin receta: aplicamos el RESOLVER en capas (directorio → web_search
+           → probe → GDPR). Si devuelve kind=auto, conducimos el bucle IA
+           sobre la URL. Para semi_auto/email_draft, persistimos la resolución
+           y dejamos que la UI ofrezca la acción al usuario (1 clic o correo).
+
+        Invariante: nunca queda una cuenta sin acción concreta. La caída a
+        "manual sin instrucciones" desaparece.
+        """
         acc = db.get_account(account_id)
         recipe = get_recipe(acc["platform"])
-        if not recipe:
-            db.set_status(account_id, "manual",
-                          f"Sin receta para {acc['platform']}. Añade una en ~/.rastrillo/recipes/")
+
+        if recipe:
+            self._sync_recipe_hash(account_id, acc, recipe)
+            self._run_with_browser(
+                account_id,
+                lambda page: self._run_steps(account_id, recipe, page),
+            )
             return
 
-        # Si la receta cambió desde el último run, los current_step viejos ya
-        # no apuntan a lo mismo. Reset y seguir.
-        self._sync_recipe_hash(account_id, acc, recipe)
+        # Sin receta → resolver en capas
+        host = acc["source_site"] or acc["platform"]
+        res = resolver.resolve(host, acc["identifier"] or "")
+        db.update_account(
+            account_id,
+            action_meta=json.dumps(res.to_meta(), ensure_ascii=False),
+        )
+        if res.url:
+            db.update_account(account_id, profile_url=res.url)
 
+        if res.kind == "semi_auto":
+            db.set_status(account_id, "semi_auto",
+                          f"{res.title}\n{res.notes}\nEnlace: {res.url}")
+            return
+        if res.kind == "email_draft":
+            db.set_status(account_id, "email_draft",
+                          f"{res.title}\n{res.notes}\n"
+                          f"Para: {res.email_to}\nAsunto: {res.email_subject}")
+            return
+
+        # kind == "auto": tenemos URL del resolver e IA disponible (lo garantiza
+        # el resolver al elegir 'auto'). Conducimos el bucle de agente.
+        self._run_with_browser(
+            account_id,
+            lambda page: self._run_ai_flow(account_id, res, page, host),
+        )
+
+    def _run_with_browser(self, account_id, body):
+        """Abre el contexto persistente de Chromium y ejecuta `body(page)`.
+        Centraliza el try/except de KeyboardInterrupt y screenshot de error."""
         db.set_status(account_id, "in_progress", "iniciando")
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
@@ -76,18 +118,72 @@ class Engine:
             )
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             try:
-                self._run_steps(account_id, recipe, page)
+                body(page)
             except KeyboardInterrupt:
-                # Ctrl-C: dejar la cuenta lista para reanudar, NO como failed.
-                nxt = db.get_account(account_id)["current_step"] or 0
+                nxt = (db.get_account(account_id)["current_step"] or 0)
                 db.set_status(account_id, "queued",
                               f"interrumpida; reanudar en paso {nxt}")
-                raise   # propagar para que el bucle externo también pare
+                raise
             except Exception as e:
                 db.set_status(account_id, "failed", f"{type(e).__name__}: {e}")
                 self._shot(page, account_id, "error")
             finally:
                 ctx.close()
+
+    def _run_ai_flow(self, account_id, res, page, host):
+        """Conduce el bucle de IA sobre la URL resuelta. Si el agente no logra
+        cerrar el flujo, degrada a `semi_auto` con el link para que el usuario
+        lo termine de un clic — nunca a "sin acción"."""
+        url = res.url
+        notes = res.notes or ""
+        db.log(account_id, "info", f"ai-flow: goto {url}")
+        page.goto(url, wait_until="domcontentloaded")
+
+        goal = (
+            f"Eliminar (o anonimizar) la cuenta en {host}. "
+            f"Notas: {notes or '(sin notas)'}. "
+            "Localiza y pulsa 'Delete/Close account', sigue los modales y "
+            "confirmaciones. Si pide login, CAPTCHA, 2FA, contraseña o un "
+            "código por email, responde need_user."
+        )
+
+        def _on_action(action):
+            kind = action.get("action")
+            reason = (action.get("reason") or "")[:120]
+            db.log(account_id, "info", f"ai turno: {kind} — {reason}")
+
+        result = ai_assist.run_agent(page, goal, max_iters=8, on_action=_on_action)
+        outcome = result["outcome"]
+        reason = result.get("reason") or ""
+
+        if outcome == "need_user":
+            self.pause_handler(account_id, (reason or "Necesito que confirmes en la ventana.")
+                               + f"\nEnlace: {url}")
+            db.log(account_id, "info", "ai-flow: reanudando tras pausa humana")
+            result2 = ai_assist.run_agent(page, goal, max_iters=3, on_action=_on_action)
+            outcome = result2["outcome"]
+            reason = result2.get("reason") or reason
+            if outcome == "done":
+                status = result2.get("result_status") or "deleted"
+                db.set_status(account_id, status, f"verificado por IA: {reason}")
+                self._shot(page, account_id, "final")
+                return
+
+        if outcome == "done":
+            status = result.get("result_status") or "deleted"
+            db.set_status(account_id, status, f"verificado por IA: {reason}")
+            self._shot(page, account_id, "final")
+            return
+
+        # Degradación a `semi_auto` (no a 'manual sin acción'): el usuario ve
+        # un botón con el link de 1 clic.
+        db.set_status(
+            account_id, "semi_auto",
+            f"IA no pudo cerrar el flujo automáticamente ({outcome}: {reason}). "
+            f"Termínalo manualmente desde este enlace:\n{url}"
+            + (f"\n\nNotas: {notes}" if notes else ""),
+        )
+        self._shot(page, account_id, "ai_stopped")
 
     def _sync_recipe_hash(self, account_id, acc, recipe):
         h = _recipe_hash(recipe)
