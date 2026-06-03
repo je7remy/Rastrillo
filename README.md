@@ -49,6 +49,18 @@ desactivada y Rastrillo cae a degradación elegante: te muestra en el dashboard
 el link de borrado de cada plataforma (del directorio) para que lo termines
 tú con un clic.
 
+## Cobertura extra
+
+Maigret cruza resultados entre redes sociales y suele encontrar más cuentas
+que Sherlock. Es opcional; instálalo cuando quieras y el siguiente scan lo
+usará automáticamente:
+
+```bash
+pip install maigret    # dentro del venv de Rastrillo
+```
+
+Si `maigret` no está en PATH, Rastrillo lo salta en silencio.
+
 ## Uso
 
 ```bash

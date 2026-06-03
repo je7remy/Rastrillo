@@ -25,9 +25,11 @@ API pública:
   discover(usernames, emails) -> dict(found, kept, no_recipe, errors, raw_counts)
 """
 import csv
+import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -45,6 +47,7 @@ log = logging.getLogger("rastrillo.discovery")
 _DEF_SHERLOCK_TIMEOUT = 900    # 15 min — Sherlock recorre ~400 sitios
 _DEF_SHERLOCK_PER_SITE = 60    # antes 10s, falsos negativos abundantes
 _DEF_HOLEHE_TIMEOUT = 600      # holehe tarda ~30s contra ~120 sitios
+_DEF_MAIGRET_TIMEOUT = 300     # maigret es similar a sherlock pero algo más lento
 
 
 def _env_int(name, default):
@@ -311,6 +314,122 @@ def _read_holehe_csv(path: Path):
     return out
 
 
+# --- Maigret (opt-in: solo si está en PATH) --------------------------------
+def maigret_available() -> bool:
+    """True si el binario `maigret` está en PATH. Comprueba en cada llamada
+    para soportar instalación a runtime sin reiniciar Rastrillo."""
+    return shutil.which("maigret") is not None
+
+
+def run_maigret(username, timeout=None):
+    """Devuelve dict con la misma forma que run_sherlock/run_holehe:
+        {hits, error, incomplete, raw_count, skipped}
+
+    `skipped=True` cuando el binario maigret NO está instalado. Ese es el
+    comportamiento normal por defecto: maigret es opt-in.
+
+    Errores conocidos:
+      - timeout global → incomplete=True, lee lo que haya escrito.
+      - JSON de salida ausente o inválido → error visible, NO crash.
+      - exit != 0 → error textual; los hits parciales se conservan.
+    """
+    if not _valid_username(username):
+        return {"hits": [], "error": f"username inválido: {username!r}",
+                "incomplete": False, "raw_count": 0, "skipped": False}
+
+    if not maigret_available():
+        return {"hits": [], "error": None, "incomplete": False,
+                "raw_count": 0, "skipped": True}
+
+    timeout = timeout or _env_int("RASTRILLO_MAIGRET_TIMEOUT", _DEF_MAIGRET_TIMEOUT)
+
+    hits = []
+    error = None
+    incomplete = False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # `--folderoutput` evita que maigret deje archivos en el cwd del proceso.
+        # `--no-progressbar` mantiene stdout limpio. `--timeout 15` es por-sitio
+        # (el global del subprocess lo manejamos nosotros).
+        cmd = [
+            "maigret", username,
+            "--json", "simple",
+            "--folderoutput", tmp,
+            "--no-progressbar",
+            "--timeout", "15",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=timeout, check=False,
+            )
+            if proc.returncode != 0:
+                tail = (proc.stderr or "").strip().splitlines()[-3:]
+                error = f"maigret exit={proc.returncode}: {' | '.join(tail) or '(sin stderr)'}"
+                log.warning("maigret(%s) exit=%s: %s", username, proc.returncode, tail)
+        except FileNotFoundError:
+            # Carrera improbable: maigret desapareció entre el `which` y el run.
+            return {"hits": [], "error": "Maigret no instalado",
+                    "incomplete": True, "raw_count": 0, "skipped": False}
+        except subprocess.TimeoutExpired:
+            incomplete = True
+            error = (f"maigret cortado por timeout global ({timeout}s); "
+                     "resultados PARCIALES — sube RASTRILLO_MAIGRET_TIMEOUT")
+            log.warning("maigret(%s) timeout %ss; leyendo lo parcial", username, timeout)
+
+        # Maigret escribe `<username>.json` (formato simple) en el folderoutput.
+        # Algunos exports usan también `<username>_report.json` u otros sufijos
+        # — recogemos todos los .json del tempdir.
+        jsons = list(Path(tmp).glob("*.json"))
+        if not jsons:
+            if not error:
+                error = "maigret no produjo JSON de salida"
+            log.error("maigret(%s) sin JSON en %s", username, tmp)
+        for f in jsons:
+            hits.extend(_read_maigret_json(f))
+
+    return {"hits": hits, "error": error, "incomplete": incomplete,
+            "raw_count": len(hits), "skipped": False}
+
+
+def _read_maigret_json(path: Path):
+    """Parsea el JSON de maigret. Tolerante a dos variantes de schema vistas
+    entre versiones: status como string ('Claimed') o como dict con la clave
+    'status' anidada."""
+    out = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as fh:
+            data = json.load(fh)
+    except Exception as e:
+        log.exception("error leyendo JSON de maigret %s", path)
+        return [{"_error": f"maigret json: {e}"}]
+    if not isinstance(data, dict):
+        return []
+    for site_name, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        # status puede ser dict {"status": "Claimed"} o str "Claimed"
+        status_field = info.get("status")
+        if isinstance(status_field, dict):
+            status_str = str(status_field.get("status") or "")
+        elif isinstance(status_field, str):
+            status_str = status_field
+        else:
+            continue
+        if status_str.strip().lower() != "claimed":
+            continue
+        url_user = (info.get("url_user") or info.get("url") or
+                    info.get("url_main") or "")
+        url_user = url_user.strip()
+        source_site = _host_from_url(url_user) or site_name.lower()
+        out.append({
+            "name": site_name,
+            "url": url_user or None,
+            "source_site": source_site,
+        })
+    return out
+
+
 # --- Orquestación: discover -------------------------------------------------
 def discover(usernames, emails):
     """Corre ambos escáneres, casa con recetas y puebla la DB.
@@ -326,8 +445,11 @@ def discover(usernames, emails):
     recipes = load_recipes()
     summary = {
         "found": 0, "kept": 0, "no_recipe": [], "errors": [],
-        "raw_counts": {"sherlock": 0, "holehe": 0, "hibp": 0,
-                       "sherlock_saved": 0, "holehe_saved": 0, "hibp_saved": 0},
+        "raw_counts": {
+            "sherlock": 0, "holehe": 0, "hibp": 0, "maigret": 0,
+            "sherlock_saved": 0, "holehe_saved": 0, "hibp_saved": 0,
+            "maigret_saved": 0,
+        },
     }
 
     def _register(hit, identifier, source):
@@ -341,7 +463,7 @@ def discover(usernames, emails):
         url = hit.get("url")
         source_site = hit.get("source_site") or _host_from_url(url) or name.lower()
 
-        # Score de confianza (sherlock genera falsos positivos)
+        # Score de confianza (sherlock/maigret generan falsos positivos)
         if source == "holehe":
             confidence = _holehe_confidence()
         elif source == "hibp":
@@ -349,6 +471,10 @@ def discover(usernames, emails):
             # El identificador es único; confianza alta.
             confidence = "high"
         elif source == "sherlock":
+            confidence = _sherlock_confidence(identifier, hit)
+        elif source == "maigret":
+            # Misma naturaleza que sherlock (búsqueda por username); reusamos
+            # la misma heurística de longitud/distintividad/match-en-URL.
             confidence = _sherlock_confidence(identifier, hit)
         else:
             confidence = "high"   # manual: el usuario lo metió a mano
@@ -406,6 +532,27 @@ def discover(usernames, emails):
             if _register(h, u, "sherlock"):
                 summary["raw_counts"]["sherlock_saved"] += 1
 
+        # Maigret: opt-in. Si el binario no está, skipped=True y seguimos.
+        # Si revienta por cualquier razón, registramos el error pero el resto
+        # de fuentes (sherlock ya pasado, holehe/hibp pendientes) continúan.
+        try:
+            mres = run_maigret(u)
+        except Exception as e:
+            log.exception("run_maigret(%s) lanzó excepción inesperada", u)
+            summary["errors"].append(
+                {"source": "maigret", "id": u, "error": str(e)}
+            )
+            mres = None
+        if mres and not mres.get("skipped"):
+            summary["raw_counts"]["maigret"] += mres["raw_count"]
+            if mres.get("error"):
+                summary["errors"].append(
+                    {"source": "maigret", "id": u, "error": mres["error"]}
+                )
+            for h in mres["hits"]:
+                if _register(h, u, "maigret"):
+                    summary["raw_counts"]["maigret_saved"] += 1
+
     for e in emails or []:
         if not _valid_email(e):
             summary["errors"].append(
@@ -437,16 +584,21 @@ def discover(usernames, emails):
 
     rc = summary["raw_counts"]
     log.info(
-        "discover: sherlock %s->%s | holehe %s->%s | hibp %s->%s | errores %s",
+        "discover: sherlock %s->%s | maigret %s->%s | holehe %s->%s | "
+        "hibp %s->%s | errores %s",
         rc["sherlock"], rc["sherlock_saved"],
+        rc["maigret"], rc["maigret_saved"],
         rc["holehe"], rc["holehe_saved"],
         rc["hibp"], rc["hibp_saved"],
         len(summary["errors"]),
     )
+    # `print` va al stdout del proceso; en Windows con cp1252 los caracteres
+    # unicode rompen, así que usamos ASCII puro aquí (el logger sí los admite).
     print(
-        f"[discover] sherlock {rc['sherlock']}→{rc['sherlock_saved']} | "
-        f"holehe {rc['holehe']}→{rc['holehe_saved']} | "
-        f"hibp {rc['hibp']}→{rc['hibp_saved']} | "
+        f"[discover] sherlock {rc['sherlock']}->{rc['sherlock_saved']} | "
+        f"maigret {rc['maigret']}->{rc['maigret_saved']} | "
+        f"holehe {rc['holehe']}->{rc['holehe_saved']} | "
+        f"hibp {rc['hibp']}->{rc['hibp_saved']} | "
         f"errores {len(summary['errors'])}"
     )
     return summary
