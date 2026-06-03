@@ -28,6 +28,46 @@ log = logging.getLogger("rastrillo.audit")
 AUDIT_PATH: Path = config.BASE_DIR / "audit.json"
 _lock = threading.Lock()
 
+# Tier 3.2: tamaño máximo antes de rotar. Por encima de esto, renombramos
+# el archivo actual a `audit_<ts>.json` y empezamos uno nuevo. Configurable
+# por env por si alguien quiere apretar más / menos.
+import os as _os
+
+
+def _max_bytes() -> int:
+    try:
+        return int(_os.environ.get("RASTRILLO_AUDIT_MAX_BYTES", str(5 * 1024 * 1024)))
+    except ValueError:
+        return 5 * 1024 * 1024
+
+
+def _rotate_if_big() -> Optional[Path]:
+    """Si audit.json supera el límite, lo renombra a audit_<ts>.json y deja
+    el path actual libre para empezar uno nuevo. Devuelve la ruta del archivo
+    rotado (si hubo rotación) o None."""
+    try:
+        if not AUDIT_PATH.exists():
+            return None
+        size = AUDIT_PATH.stat().st_size
+        if size < _max_bytes():
+            return None
+    except OSError as e:
+        log.warning("audit: no pude inspeccionar tamaño (%s)", e)
+        return None
+    # Incluimos microsegundos en el nombre para que dos rotaciones en el
+    # mismo segundo (poco probable en producción, frecuente en tests) no
+    # colisionen.
+    import datetime as _dt
+    ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
+    rotated = AUDIT_PATH.with_name(f"audit_{ts}.json")
+    try:
+        AUDIT_PATH.rename(rotated)
+    except OSError as e:
+        log.warning("audit: rename a %s falló (%s); sigo sin rotar", rotated.name, e)
+        return None
+    log.info("audit: rotado a %s (era %d bytes)", rotated.name, size)
+    return rotated
+
 
 def _account_snapshot(account) -> Dict[str, Any]:
     """Recorta a los campos relevantes para auditoría (no incluimos events,
@@ -69,6 +109,9 @@ def record(action: str,
         entry["extra"] = extra
     with _lock:
         config.ensure_dirs()
+        # Antes de añadir: rotación si supera el umbral. Dentro del lock para
+        # que dos hilos concurrentes no se peleen por el rename.
+        _rotate_if_big()
         data: List[dict]
         if AUDIT_PATH.exists():
             try:

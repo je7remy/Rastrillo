@@ -37,6 +37,48 @@ _lock = threading.Lock()
 _USER_AGENT = "rastrillo/0.1 (+local, contact via dashboard)"
 _HTTP_TIMEOUT = 12.0
 
+# ── Throttle por dominio (Tier 2.2) ─────────────────────────────────────────
+# Evita que n peticiones seguidas al mismo host parezcan un escaneo abusivo.
+# Configurable por env. El delay se aplica ANTES de cada GET; con varios
+# workers en paralelo cada uno espera su turno por host (no globalmente).
+import os as _os
+_throttle_lock = threading.Lock()
+_last_fetch_by_host: dict = {}
+
+
+def _throttle(host: str) -> None:
+    try:
+        delay = float(_os.environ.get("RASTRILLO_PROBE_DELAY", "1.5"))
+    except ValueError:
+        delay = 1.5
+    if delay <= 0:
+        return
+    while True:
+        with _throttle_lock:
+            last = _last_fetch_by_host.get(host, 0.0)
+            now = time.time()
+            wait = (last + delay) - now
+            if wait <= 0:
+                # registramos AHORA como último intento del host y salimos
+                _last_fetch_by_host[host] = now
+                return
+        # Otro thread acaba de hacer una req: esperamos fuera del lock para
+        # no bloquear el dict del throttle entero.
+        time.sleep(wait)
+
+
+def _host_of(url: str) -> str:
+    """Host normalizado para clave de throttle (sin www. ni puerto)."""
+    if not url:
+        return ""
+    s = url.lower()
+    if "//" in s:
+        s = s.split("//", 1)[1]
+    s = s.split("/", 1)[0].split(":", 1)[0]
+    if s.startswith("www."):
+        s = s[4:]
+    return s
+
 
 # --- Modelo de resultado ----------------------------------------------------
 @dataclass
@@ -133,7 +175,13 @@ def detect_language(host: str) -> str:
 # --- HTTP helper -------------------------------------------------------------
 def _http_get(url: str, timeout: float = _HTTP_TIMEOUT) -> Optional[tuple[int, str, str]]:
     """GET sencillo con UA y captura tolerante. Devuelve (status, final_url, body)
-    o None si revienta. Limitamos body a 200 KB."""
+    o None si revienta. Limitamos body a 200 KB.
+
+    Throttle: aplicamos RASTRILLO_PROBE_DELAY entre dos GETs al mismo host
+    (Tier 2.2). Si la petición falla por timeout, 403 o 429, devolvemos None
+    y el caller sigue con el siguiente — no abortamos el lote.
+    """
+    _throttle(_host_of(url))
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
                                                    "Accept-Language": "en,es,ru;q=0.8"})
@@ -141,6 +189,9 @@ def _http_get(url: str, timeout: float = _HTTP_TIMEOUT) -> Optional[tuple[int, s
             body = r.read(200_000).decode("utf-8", errors="ignore")
             return r.status, r.geturl(), body
     except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            log.info("GET %s -> %s (rate-limit/forbidden); sigo", url, e.code)
+            return None
         # Algunas páginas devuelven 404 pero su body contiene info útil; lo aceptamos.
         try:
             body = e.read(200_000).decode("utf-8", errors="ignore")
@@ -148,7 +199,7 @@ def _http_get(url: str, timeout: float = _HTTP_TIMEOUT) -> Optional[tuple[int, s
             body = ""
         return e.code, url, body
     except Exception as e:
-        log.debug("GET %s falló: %s", url, e)
+        log.debug("GET %s fallo: %s", url, e)
         return None
 
 

@@ -68,13 +68,21 @@ async def auth_middleware(request: Request, call_next):
 
     Lo aceptamos por header X-Rastrillo-Token o por ?token=... en la query
     (útil para tests). Los GET y métodos seguros (OPTIONS, HEAD) son libres.
+
+    Mensaje del 401: enriquecido con instrucciones accionables (no es solo
+    "token inválido"; el front lo muestra como toast largo).
     """
     if request.method == "POST":
         tok = request.headers.get("x-rastrillo-token") \
             or request.query_params.get("token")
         if not tok or tok != config.AUTH_TOKEN:
             return JSONResponse(
-                {"detail": "Token de autenticación inválido o ausente."},
+                {"detail": (
+                    "Falta el token de auth o no es el del proceso actual. "
+                    "Cierra esta pestaña y abre Rastrillo desde la URL que "
+                    "se imprimió al arrancar (incluye ?token=...). Si la "
+                    "perdiste, reinicia el servidor para ver una nueva."
+                )},
                 status_code=401,
             )
     return await call_next(request)
@@ -621,6 +629,20 @@ def api_report(format: str = "json"):
         "summary": summary,
         "accounts": enriched,
     }
+
+
+# --- Onboarding -------------------------------------------------------------
+@app.get("/api/onboarding")
+def api_onboarding_status():
+    """¿Ya pasó el usuario por el panel de bienvenida en este perfil?"""
+    return {"onboarded": config.is_onboarded()}
+
+
+@app.post("/api/onboarding/dismiss")
+def api_onboarding_dismiss():
+    """El usuario pulsó "Entendido". No volvemos a mostrar el panel."""
+    config.mark_onboarded()
+    return {"ok": True}
 
 
 # --- Dry-run global ----------------------------------------------------------
@@ -1266,8 +1288,9 @@ const SHOW_MSG=new Set(["awaiting_user","manual","failed","skipped","semi_auto",
 /* ── Auth: token del proceso ─────────────────────────────────────
  * El backend genera un token aleatorio en cada arranque. Lo recibimos en la
  * URL (?token=...) al primer load y lo guardamos en sessionStorage. Todos
- * los POST lo mandan en X-Rastrillo-Token. Sin token: 401. */
-const _TOKEN=(function(){
+ * los POST lo mandan en X-Rastrillo-Token. Sin token mostramos una página
+ * explicativa con un input para pegarlo manualmente. */
+let _TOKEN=(function(){
   try{
     const u=new URL(location.href);
     const t=u.searchParams.get("token");
@@ -1832,17 +1855,32 @@ async function load(){
       list.innerHTML=filtered.map(renderRow).join("");
     }
 
-    // Scan status
+    // Scan status: mostramos la fase (Descubriendo / Resolviendo N/total) en
+    // curso, y al terminar el resumen "Último: N detectadas, M resueltas".
     const scanEl=$("scan-status");
     if(scanRes && scanRes.running){
-      scanEl.innerHTML='<span class="chip-dot warn pulse" style="display:inline-block;margin-right:6px"></span>Escaneando…';
+      let label;
+      const ph = scanRes.phase;
+      if(ph === "resolving"){
+        const tot = scanRes.total||0, done = scanRes.resolved||0;
+        label = tot>0 ? `Resolviendo ${done}/${tot}…` : "Resolviendo…";
+      } else {
+        // discovery o phase desconocida
+        label = "Descubriendo…";
+      }
+      scanEl.innerHTML=
+        '<span class="chip-dot warn pulse" style="display:inline-block;margin-right:6px"></span>'
+        + escapeHtml(label);
       scanEl.classList.add("busy");
     } else {
       scanEl.classList.remove("busy");
       if(scanRes && scanRes.last && !scanRes.last.error){
         const e=scanRes.last.errors||[];
+        const resolved = (scanRes.resolved!=null) ? scanRes.resolved : null;
         scanEl.textContent=
-          `Último escaneo: ${scanRes.last.found||0} detectadas, ${scanRes.last.kept||0} conservadas`
+          `Último escaneo: ${scanRes.last.found||0} detectadas`
+          + (resolved!=null ? `, ${resolved} resueltas`:"")
+          + `, ${scanRes.last.kept||0} conservadas`
           + (e.length?`, ${e.length} errores`:"");
       } else if(scanRes && scanRes.last && scanRes.last.error){
         scanEl.textContent="Último escaneo falló: "+scanRes.last.error;
@@ -1947,10 +1985,115 @@ document.addEventListener("keydown",(e)=>{
   }
 });
 
-/* Skeleton inicial + arranque del polling */
-$("list").innerHTML=skeletonRows(3);
-load();
-setInterval(load, 2000);
+/* ── Onboarding + token prompt ────────────────────────────────── */
+function showTokenPrompt(){
+  /* Sin token = la web acaba de cargarse sin ?token=. Mostramos un panel
+   * explicativo con un input para pegarlo manualmente. */
+  const m=$("modal");
+  m.innerHTML=`<div class="modal" role="document" style="max-width:520px">
+    <div class="modal-head">
+      <h3 id="modal-title">Necesitas el token de auth</h3>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;color:var(--text-2);line-height:1.55">
+        Rastrillo arrancó pero esta pestaña no sabe el token de auth del proceso.
+        Por seguridad, todas las acciones POST exigen ese token (te protege de
+        que otro proceso local te dispare un borrado).
+      </div>
+      <div style="font-size:13px;color:var(--text-2);line-height:1.55;margin-top:10px">
+        <b>Forma rápida:</b> en la consola donde arrancaste Rastrillo verás una
+        URL del tipo <code>http://127.0.0.1:8765/?token=...</code>. Cierra esta
+        pestaña y abre esa URL.
+      </div>
+      <div style="font-size:13px;color:var(--text-2);line-height:1.55;margin-top:10px">
+        <b>O pega el token aquí:</b>
+      </div>
+      <input id="token-input" class="input" type="text" autocomplete="off"
+             placeholder="pega el token (la parte después de ?token=)"
+             style="margin-top:8px;font-family:var(--font-mono);font-size:12.5px" />
+      <div class="hint">Si reiniciaste el servidor, el token cambió. Vuelve a abrir desde la URL nueva.</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-accent" onclick="connectWithToken()">Conectar</button>
+    </div>
+  </div>`;
+  m.classList.add("on");
+  m.onclick=null;   /* este modal NO se cierra clicando fuera */
+  setTimeout(()=>{ const i=$("token-input"); if(i) i.focus(); }, 50);
+}
+
+function connectWithToken(){
+  const v=($("token-input").value||"").trim();
+  if(!v){ toast("Pega un token primero", 3000, "err"); return; }
+  try{ sessionStorage.setItem("rastrillo-token", v); }catch(_) {}
+  _TOKEN=v;
+  closeModal();
+  bootstrap();   /* re-arranca init con el token nuevo */
+}
+
+function showWelcomePanel(){
+  const m=$("modal");
+  m.innerHTML=`<div class="modal" role="document" style="max-width:560px">
+    <div class="modal-head">
+      <h3 id="modal-title">Bienvenida a Rastrillo</h3>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;color:var(--text-2);line-height:1.55">
+        Antes de empezar, cuatro cosas que te van a pasar:
+      </div>
+      <ul style="font-size:13px;color:var(--text-2);line-height:1.6;
+                 padding-left:18px;margin-top:10px">
+        <li>Verás <b>dos ventanas</b>: este panel y, cuando proceses una cuenta,
+            un Chromium que conduce el flujo de borrado.</li>
+        <li>Te <b>logueas tú una vez por sitio</b> en ese Chromium. Rastrillo
+            <b>nunca</b> guarda contraseñas; viven solo en el perfil de
+            navegador local.</li>
+        <li>Si una plataforma exige <b>CAPTCHA, 2FA o confirmación final</b>,
+            el panel se queda esperando a que tú lo resuelvas en el Chromium
+            y pulses "Continuar".</li>
+        <li>Esto es <b>solo para tus propias cuentas</b>. Antes de cualquier
+            acción destructiva te pedimos confirmar que la cuenta es tuya.</li>
+      </ul>
+      <div class="hint" style="margin-top:12px">
+        Puedes activar el modo <b>Simulación</b> (chip en la barra superior)
+        para ver qué haría Rastrillo sin tocar nada.
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-accent" onclick="dismissWelcome()">Entendido</button>
+    </div>
+  </div>`;
+  m.classList.add("on");
+  m.onclick=null;
+}
+
+async function dismissWelcome(){
+  try{ await postJSON("/api/onboarding/dismiss", {}); }
+  catch(e){ /* sin token todavía? igual cerramos */ }
+  closeModal();
+}
+
+/* ── Bootstrap: token -> onboarding -> polling ───────────────── */
+let _bootstrapped=false;
+async function bootstrap(){
+  if(!_TOKEN){ showTokenPrompt(); return; }
+  /* Comprobamos onboarding (GET libre, sin token). */
+  if(!_bootstrapped){
+    try{
+      const ob=await fetch("/api/onboarding").then(r=>r.json());
+      if(!ob.onboarded) showWelcomePanel();
+    }catch(_){}
+    _bootstrapped=true;
+    /* Skeleton inicial + arranque del polling (solo la primera vez). */
+    $("list").innerHTML=skeletonRows(3);
+    load();
+    setInterval(load, 2000);
+  } else {
+    /* Si re-bootstrapeamos por entrada manual de token, basta un load. */
+    load();
+  }
+}
+bootstrap();
 </script>
 </body></html>"""
 

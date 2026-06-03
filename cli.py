@@ -34,6 +34,9 @@ def cmd_default(_args):
 
     db.init()
     jobs.start_workers()
+    # Tier 3.1: si el directorio cacheado tiene > RASTRILLO_DIR_MAX_AGE_DAYS,
+    # lo refrescamos en background al arrancar. No bloquea el servidor.
+    jobs.start_dir_refresh_if_stale()
 
     # Auth local: el token se generó en config.AUTH_TOKEN al importarse el
     # módulo. Va en la URL inicial (sessionStorage lo recoge) y la consola

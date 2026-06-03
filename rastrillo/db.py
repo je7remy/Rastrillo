@@ -27,10 +27,16 @@ Identidad de una cuenta:
   hay source_site; fallback a (platform, identifier) para inserts manuales sin
   source_site.
 """
+import logging
+import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional
 from . import config
+
+_log = logging.getLogger("rastrillo.db")
 
 # SQL: la tabla `accounts` NO lleva UNIQUE constraint sobre (platform, identifier)
 # para no colapsar sitios distintos que comparten slug de receta. La unicidad
@@ -239,6 +245,28 @@ def stats():
         return {r["status"]: r["c"] for r in rows}
 
 
+def snapshot_db() -> Optional[Path]:
+    """Tier 3.2: copia rastrillo.db a ~/.rastrillo/backups/rastrillo_<ts>.db
+    antes de un borrado masivo. Devuelve la ruta del snapshot o None si la
+    DB todavía no existía (nada que respaldar).
+
+    Los backups NO se borran automáticamente: el usuario decide cuándo limpiar
+    la carpeta. Esto es la red de seguridad por si `clear_accounts` se
+    dispara por error.
+    """
+    if not config.DB_PATH.exists():
+        return None
+    backup_dir = config.BASE_DIR / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    target = backup_dir / f"rastrillo_{ts}.db"
+    # copy2 preserva metadatos y respeta locks de SQLite mejor que copyfile
+    # en Windows; aún así, idealmente nadie está escribiendo en este momento.
+    shutil.copy2(config.DB_PATH, target)
+    _log.info("snapshot DB -> %s", target)
+    return target
+
+
 def clear_accounts():
     """Vacía la tabla de cuentas y su historial de eventos.
 
@@ -247,7 +275,15 @@ def clear_accounts():
       - el directorio cacheado (~/.rastrillo/directory.json),
       - los hallazgos del resolver (~/.rastrillo/discovered.json),
       - el perfil persistente de Chromium.
+
+    Antes de tocar nada, hace un snapshot en ~/.rastrillo/backups/.
     """
+    try:
+        snapshot_db()
+    except Exception as e:
+        # No abortamos por un fallo de copia (disco lleno, permisos, etc.);
+        # solo lo dejamos en log. La operación destructiva sigue.
+        _log.warning("snapshot DB falló (sigo con clear): %s", e)
     with connect() as con:
         con.execute("DELETE FROM events")
         con.execute("DELETE FROM accounts")

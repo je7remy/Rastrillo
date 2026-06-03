@@ -17,10 +17,13 @@ Invariantes que respeta este módulo:
   bloquea hasta que el humano confirme desde la UI.
 """
 import json
+import concurrent.futures
+import json
 import logging
+import os
 import queue
 import threading
-from typing import Dict
+from typing import Dict, List
 
 from . import db
 from .discovery import discover
@@ -111,44 +114,97 @@ def queue_size() -> int:
 
 
 # --- Escaneo asíncrono -------------------------------------------------------
-def _auto_resolve_pending() -> int:
-    """Tras discovery, prepara la Resolution de cada cuenta no-keep que no
-    tenga receta. La persiste en `action_meta` y `profile_url`, pero NO toca
-    el status: la cuenta sigue `found` hasta que el usuario haga triage
-    (es un trabajo informativo, no destructivo, así que no requiere owned).
+def _resolver_workers() -> int:
+    """Pool acotado para las capas HTTP del resolver. NO toca la concurrencia
+    del motor Playwright (eso es un único worker secuencial siempre)."""
+    try:
+        n = int(os.environ.get("RASTRILLO_RESOLVER_WORKERS", "5"))
+    except ValueError:
+        n = 5
+    return max(1, min(n, 16))   # cota dura: nunca > 16
 
-    Devuelve cuántas cuentas se enriquecieron.
-    """
-    # Imports diferidos para no crear ciclos con resolver -> ai_assist -> config.
-    from . import resolver as _resolver
+
+def _candidates_to_resolve() -> List[dict]:
+    """Filas elegibles para auto-resolver: status='found', sin receta JSON,
+    sin action_meta previa, con host derivable."""
     from .recipes import get_recipe
-
-    n = 0
+    out = []
     for row in db.list_accounts(status="found"):
         if get_recipe(row["platform"]):
-            continue   # ya tiene ruta determinista
+            continue
         if row["action_meta"]:
-            continue   # ya tiene Resolution previa
+            continue
         host = row["source_site"] or row["platform"]
         if not host:
             continue
-        try:
-            res = _resolver.resolve(host, row["identifier"] or "")
-        except Exception as e:
-            log.warning("auto-resolver(%s) falló: %s", host, e)
-            continue
-        try:
-            db.update_account(
-                row["id"],
-                action_meta=json.dumps(res.to_meta(), ensure_ascii=False),
-            )
-            if res.url:
-                db.update_account(row["id"], profile_url=res.url)
-            n += 1
-        except Exception as e:
-            log.warning("auto-resolver guardado fallo acc=%s: %s", row["id"], e)
-    log.info("auto-resolver: %s cuentas enriquecidas", n)
-    return n
+        out.append(dict(row))   # snapshot inmutable para pasar al thread
+    return out
+
+
+def _resolve_one(row: dict) -> bool:
+    """Resuelve UNA cuenta y persiste el resultado. Devuelve True si guardó.
+    No re-lanza excepciones: el pool seguiría aunque un host explote.
+
+    Importante: `resolver.resolve()` ya respeta el caché en
+    ~/.rastrillo/discovered.json — si el host ya está cacheado, no hace red.
+    Así no re-fetcheamos lo conocido (parte del Tier 2.2).
+    """
+    from . import resolver as _resolver
+    host = row["source_site"] or row["platform"]
+    try:
+        res = _resolver.resolve(host, row["identifier"] or "")
+    except Exception as e:
+        log.warning("auto-resolver(%s) fallo: %s", host, e)
+        return False
+    try:
+        db.update_account(
+            row["id"],
+            action_meta=json.dumps(res.to_meta(), ensure_ascii=False),
+        )
+        if res.url:
+            db.update_account(row["id"], profile_url=res.url)
+        return True
+    except Exception as e:
+        log.warning("auto-resolver guardado fallo acc=%s: %s", row["id"], e)
+        return False
+
+
+def _auto_resolve_pending() -> int:
+    """Tras discovery, paraleliza la resolución de cuentas en ThreadPoolExecutor
+    acotado. Solo cubre las capas HTTP (directorio + probe + GDPR fetch); el
+    motor Playwright sigue siendo un worker único.
+
+    Actualiza `_scan_status['resolved']` y `_scan_status['total']` a medida que
+    cada futuro completa, para que la UI pueda enseñar "Resolviendo N/total".
+    """
+    pending = _candidates_to_resolve()
+    total = len(pending)
+    with _lock:
+        _scan_status["total"] = total
+        _scan_status["resolved"] = 0
+    if not pending:
+        log.info("auto-resolver: 0 candidatos")
+        return 0
+
+    workers = min(_resolver_workers(), total)
+    n_ok = 0
+    log.info("auto-resolver: %s candidatos, %s workers", total, workers)
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="rastrillo-resolve") as pool:
+        futures = {pool.submit(_resolve_one, r): r for r in pending}
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                ok = fut.result()
+            except Exception as e:
+                log.warning("auto-resolver future inesperado: %s", e)
+                ok = False
+            if ok:
+                n_ok += 1
+            with _lock:
+                # +1 por cada cuenta procesada, ok o no
+                _scan_status["resolved"] = (_scan_status.get("resolved", 0) or 0) + 1
+    log.info("auto-resolver: %s/%s cuentas enriquecidas", n_ok, total)
+    return n_ok
 
 
 def scan_async(usernames, emails) -> None:
@@ -185,3 +241,56 @@ def scan_async(usernames, emails) -> None:
 def scan_status() -> dict:
     with _lock:
         return dict(_scan_status)
+
+
+# --- Refresh automático del directorio (Tier 3.1) --------------------------
+def _dir_max_age_seconds() -> float:
+    try:
+        days = float(os.environ.get("RASTRILLO_DIR_MAX_AGE_DAYS", "30"))
+    except ValueError:
+        days = 30.0
+    return max(1.0, days) * 86400.0
+
+
+def start_dir_refresh_if_stale() -> threading.Thread:
+    """Lanza un thread background que comprueba la edad de directory.json y
+    re-descarga si supera RASTRILLO_DIR_MAX_AGE_DAYS (default 30). No bloquea
+    el arranque del servidor. Errores se loguean en silencio (fallback al
+    caché existente).
+
+    El botón manual `/api/directory/refresh` sigue funcionando.
+    """
+    def _check():
+        import time as _t
+        # Import diferido: directory toca config en runtime.
+        from . import directory as _dir
+        try:
+            d = _dir.load_directory()
+        except Exception as e:
+            log.warning("auto-refresh dir: load_directory falló: %s", e)
+            return
+        fetched = d.fetched_at
+        if not fetched:
+            log.info("auto-refresh dir: el directorio no tiene fetched_at; refresco")
+            should = True
+        else:
+            age = _t.time() - float(fetched)
+            should = age > _dir_max_age_seconds()
+            if should:
+                log.info("auto-refresh dir: edad %.1fd > umbral; refresco",
+                         age / 86400.0)
+            else:
+                log.info("auto-refresh dir: edad %.1fd <= umbral; no toco",
+                         age / 86400.0)
+        if not should:
+            return
+        try:
+            _dir.load_directory(force_refresh=True)
+            log.info("auto-refresh dir: OK")
+        except Exception as e:
+            # Sin red / 503 / lo que sea: nos quedamos con la caché.
+            log.warning("auto-refresh dir: descarga falló (%s); sigo con caché", e)
+
+    t = threading.Thread(target=_check, daemon=True, name="rastrillo-dir-refresh")
+    t.start()
+    return t
