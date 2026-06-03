@@ -586,21 +586,39 @@ def api_report(format: str = "json"):
             headers={"Content-Disposition": f'attachment; filename="rastrillo-{ts}.csv"'},
         )
 
-    # JSON por defecto, con resumen agregado.
+    # Resumen agregado (compartido por JSON y PDF)
     stats = db.stats()
     audit_entries = audit.read_all()
     by_action = {}
     for a in audit_entries:
         by_action[a["action"]] = by_action.get(a["action"], 0) + 1
+    summary = {
+        "total":         len(enriched),
+        "by_status":     stats,
+        "audit_actions": by_action,
+        "audit_total":   len(audit_entries),
+    }
+
+    if format == "pdf":
+        from . import report_pdf
+        data = report_pdf.render_pdf(
+            accounts=enriched,
+            summary=summary,
+            audit_summary=by_action,
+            generated_at=now,
+        )
+        ts = _t.strftime("%Y%m%d-%H%M%S", _t.gmtime(now))
+        return Response(
+            content=data,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="rastrillo-{ts}.pdf"'},
+        )
+
+    # JSON por defecto
     return {
         "generated_at": now,
         "generated_at_iso": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(now)),
-        "summary": {
-            "total":         len(enriched),
-            "by_status":     stats,
-            "audit_actions": by_action,
-            "audit_total":   len(audit_entries),
-        },
+        "summary": summary,
         "accounts": enriched,
     }
 
@@ -1112,11 +1130,17 @@ button:focus-visible,
     <button id="dir-refresh" class="btn btn-icon btn-ghost"
             aria-label="Refrescar directorio"
             title="Refrescar directorio"></button>
-    <a id="report-btn" class="btn btn-sm btn-ghost"
+    <a id="report-csv-btn" class="btn btn-sm btn-ghost"
        href="/api/report?format=csv" download
-       title="Descargar informe CSV con todas las cuentas">
+       title="Descargar informe en CSV (apto para análisis)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-      Informe
+      CSV
+    </a>
+    <a id="report-pdf-btn" class="btn btn-sm btn-ghost"
+       href="/api/report?format=pdf" download
+       title="Descargar informe en PDF (listo para imprimir/archivar)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M9 13h6M9 17h4"/></svg>
+      PDF
     </a>
     <button id="theme-toggle" class="btn btn-icon btn-ghost"
             aria-label="Cambiar tema"

@@ -6,3 +6,4 @@ rich>=13.7
 sherlock-project>=0.15.0
 holehe>=1.61
 anthropic>=0.30        # opcional: solo para el modo IA de respaldo
+reportlab>=4.0         # generación de PDF para el informe
