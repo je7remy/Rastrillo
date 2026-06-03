@@ -55,6 +55,14 @@ tú con un clic.
 rastrillo
 ```
 
+En Windows, si no quieres activar el venv cada vez, hay wrappers en la raíz
+del repo:
+
+```powershell
+.\rastrillo.ps1            # PowerShell
+.\rastrillo.cmd            # cmd / doble-click desde el Explorador
+```
+
 Eso es todo. Levanta el dashboard local en `http://127.0.0.1:8765` y abre el
 navegador automáticamente. Desde la web:
 
