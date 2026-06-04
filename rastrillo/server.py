@@ -304,12 +304,18 @@ def api_process_all_auto():
         "skipped_unowned": 0, "skipped_status": 0,
         "visited": 0,
     }
+    summary["skipped_exposure"] = 0
     for row in db.list_accounts():
         if row["status"] != "found":
             summary["skipped_status"] += 1
             continue
         if not row["owned"]:
             summary["skipped_unowned"] += 1
+            continue
+        # Exposición en brecha (source='hibp'): requiere confirmación explícita
+        # del usuario antes de tratarse como cuenta para borrar.
+        if (row["source"] or "") == "hibp":
+            summary["skipped_exposure"] += 1
             continue
         summary["visited"] += 1
         # Receta: ruta determinista; encolar directamente.
@@ -356,6 +362,28 @@ def api_process_all_auto():
             db.set_status(row["id"], "email_draft", msg)
             summary["email_draft"] += 1
     return summary
+
+
+@app.post("/api/accounts/{account_id}/confirm-account")
+def api_confirm_account(account_id: int):
+    """El usuario confirma que tras una brecha HIBP sí tiene cuenta activa
+    en el sitio. Promovemos `source` a 'hibp_confirmed' para que el resto
+    del sistema (auto-resolver, process-all-auto, filtros) la trate como
+    cuenta normal candidata a borrado.
+
+    No marca owned: el preflight de propiedad sigue siendo obligatorio antes
+    de cualquier acción destructiva."""
+    acc = db.get_account(account_id)
+    if not acc:
+        raise HTTPException(404, "Cuenta no encontrada.")
+    if (acc["source"] or "") != "hibp":
+        raise HTTPException(409, "Esta cuenta no es una exposición HIBP.")
+    db.update_account(account_id, source="hibp_confirmed")
+    db.log(account_id, "info",
+           "usuario confirmó cuenta activa tras brecha HIBP")
+    audit.record("confirm_account", acc,
+                 extra={"from": "hibp", "to": "hibp_confirmed"})
+    return {"ok": True, "source": "hibp_confirmed"}
 
 
 @app.post("/api/accounts/discard-low")
@@ -1214,6 +1242,7 @@ button:focus-visible,
       <div class="filters" role="tablist" aria-label="Filtros de cuentas">
         <button class="filter on" id="f-all"       data-f="all"       onclick="setFilter('all')"       role="tab">Todas</button>
         <button class="filter"    id="f-triage"    data-f="triage"    onclick="setFilter('triage')"    role="tab">Triage</button>
+        <button class="filter"    id="f-exposure"  data-f="exposure"  onclick="setFilter('exposure')"  role="tab">Brechas</button>
         <button class="filter"    id="f-pending"   data-f="pending"   onclick="setFilter('pending')"   role="tab">Pendientes</button>
         <button class="filter"    id="f-your_turn" data-f="your_turn" onclick="setFilter('your_turn')" role="tab">Tu turno</button>
         <button class="filter"    id="f-action"    data-f="action"    onclick="setFilter('action')"    role="tab">Acción</button>
@@ -1282,6 +1311,11 @@ const GROUPS={
   kept     :["skipped"],
   discarded:["not_mine"],
 };
+/* Helper para distinguir filas de exposición (HIBP no confirmada). El filtro
+ * "exposure" se basa en SOURCE, no en STATUS, así que tiene su propio camino. */
+function isExposure(a){
+  return (a.source === "hibp") && (a.status === "found");
+}
 const SHOW_MSG=new Set(["awaiting_user","manual","failed","skipped","semi_auto",
                         "email_draft","user_done","dry_run","not_mine"]);
 
@@ -1364,8 +1398,12 @@ function setFilter(name){
   load();
 }
 function filterAccounts(acc){
-  if(CURRENT_FILTER==="all") return acc.filter(a=>a.status!=="not_mine");
-  if(CURRENT_FILTER==="triage") return acc.filter(a=>a.status==="found" && !a.owned);
+  if(CURRENT_FILTER==="all")
+    return acc.filter(a=>a.status!=="not_mine" && !isExposure(a));
+  if(CURRENT_FILTER==="triage")
+    return acc.filter(a=>a.status==="found" && !a.owned && !isExposure(a));
+  if(CURRENT_FILTER==="exposure")
+    return acc.filter(isExposure);
   const set=new Set(GROUPS[CURRENT_FILTER]||[]);
   return acc.filter(a=>set.has(a.status));
 }
@@ -1396,6 +1434,12 @@ function actionsFor(a){
   }
   if(a.status==="not_mine"){
     return `<button class="btn btn-sm btn-ghost" onclick="markMine(${id})">${ic("check")}Era mía</button>`;
+  }
+  if(isExposure(a)){
+    // Brecha HIBP no confirmada: el usuario decide si tiene cuenta activa
+    // allí. Solo entonces el resolver / borrado actúa.
+    return `<button class="btn btn-sm btn-primary" onclick="confirmAccount(${id})">${ic("check")}Sí, tengo cuenta</button>`
+      + `<button class="btn btn-sm btn-danger" onclick="markNotMine(${id})">${ic("x")}No tengo</button>`;
   }
   if(a.status==="found"){
     // Triage: cuando aún no se confirmó propiedad, ofrecemos el camino rápido
@@ -1495,6 +1539,15 @@ async function markMine(id){
   } catch(e){ toast(e.message, 7000, "err"); }
   load();
 }
+async function confirmAccount(id){
+  /* "Sí, tengo cuenta aquí": promueve un hit HIBP (exposición) a cuenta
+   * normal. Después pasa a Triage y al flujo de borrado habitual. */
+  try{
+    await postJSON(`/api/accounts/${id}/confirm-account`,{});
+    toast("Cuenta confirmada — entra al flujo normal");
+  } catch(e){ toast(e.message, 7000, "err"); }
+  load();
+}
 async function markNotMine(id){
   try{
     await postJSON(`/api/accounts/${id}/own`,{owned:false});
@@ -1549,10 +1602,14 @@ function askProcessAllAuto(){
 function computeStats(stats, accounts){
   const sum=k=>k.reduce((n,x)=>n+(stats[x]||0),0);
   const acc = accounts || [];
-  const triage = acc.filter(a=>a.status==="found" && !a.owned).length;
-  const owned_found = acc.filter(a=>a.status==="found" && a.owned).length;
+  const exposure = acc.filter(isExposure).length;
+  /* Triage no-exposure: cuentas activas pendientes de ownership */
+  const triage = acc.filter(a=>a.status==="found" && !a.owned && !isExposure(a)).length;
+  const owned_found = acc.filter(
+    a=>a.status==="found" && a.owned && (a.source||"")!=="hibp").length;
   return {
     total:     sum(Object.keys(stats)),
+    exposure:  exposure,
     triage:    triage,
     pending:   sum(GROUPS.pending) + owned_found,
     your_turn: sum(GROUPS.your_turn),
@@ -1560,7 +1617,8 @@ function computeStats(stats, accounts){
     done:      sum(GROUPS.done),
     kept:      sum(GROUPS.kept),
     discarded: sum(GROUPS.discarded),
-    /* Candidatas a "Procesar todo automatizable": owned=1 y status=found. */
+    /* Candidatas a "Procesar todo automatizable": owned=1 y status=found,
+     * excluyendo HIBP no confirmadas. */
     automatable: owned_found,
   };
 }
@@ -1828,8 +1886,9 @@ async function load(){
     $("stats").innerHTML=renderStats(stats);
 
     // Filtros: contadores
-    $("f-all").textContent=`Todas · ${stats.total - stats.discarded}`;
+    $("f-all").textContent=`Todas · ${stats.total - stats.discarded - stats.exposure}`;
     $("f-triage").textContent=`Triage · ${stats.triage}`;
+    $("f-exposure").textContent=`Brechas · ${stats.exposure}`;
     $("f-pending").textContent=`Pendientes · ${stats.pending}`;
     $("f-your_turn").textContent=`Tu turno · ${stats.your_turn}`;
     $("f-action").textContent=`Acción · ${stats.action}`;
@@ -1852,7 +1911,14 @@ async function load(){
     } else if(!filtered.length){
       list.innerHTML=emptyFilter();
     } else {
-      list.innerHTML=filtered.map(renderRow).join("");
+      const banner = (CURRENT_FILTER==="exposure")
+        ? `<div class="row-msg" style="background:var(--info-bg);color:var(--info);grid-column:1 / -1;margin:0 0 8px;padding:12px 14px;line-height:1.55;border-radius:var(--r-md)">
+             <b>Estas no son cuentas confirmadas.</b> Tu correo apareció en un volcado de
+             datos de estos dominios. Eso no quiere decir que tengas cuenta activa allí.
+             Marca "Sí, tengo cuenta" solo en los sitios donde sepas que abriste una;
+             el resto, "No tengo" — así no mandas solicitudes GDPR a sitios sin cuenta tuya.
+           </div>` : "";
+      list.innerHTML = banner + filtered.map(renderRow).join("");
     }
 
     // Scan status: mostramos la fase (Descubriendo / Resolviendo N/total) en

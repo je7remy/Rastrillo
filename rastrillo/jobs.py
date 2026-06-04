@@ -126,10 +126,19 @@ def _resolver_workers() -> int:
 
 def _candidates_to_resolve() -> List[dict]:
     """Filas elegibles para auto-resolver: status='found', sin receta JSON,
-    sin action_meta previa, con host derivable."""
+    sin action_meta previa, con host derivable.
+
+    Excluye explícitamente source='hibp': los hits de HIBP son una exposición
+    en brecha, no una cuenta confirmada — pre-calcular su Resolution sería
+    invitar al usuario a mandar correos GDPR a sitios donde quizá no tiene
+    cuenta. Solo cuando confirme con confirm-account, el source cambia a
+    'hibp_confirmed' y la fila pasa a ser candidato normal.
+    """
     from .recipes import get_recipe
     out = []
     for row in db.list_accounts(status="found"):
+        if (row["source"] or "") == "hibp":
+            continue
         if get_recipe(row["platform"]):
             continue
         if row["action_meta"]:

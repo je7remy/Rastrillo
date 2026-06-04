@@ -467,9 +467,13 @@ def discover(usernames, emails):
         if source == "holehe":
             confidence = _holehe_confidence()
         elif source == "hibp":
-            # HIBP: el email apareció en una brecha confirmada de ese dominio.
-            # El identificador es único; confianza alta.
-            confidence = "high"
+            # HIBP: el email apareció en un volcado de datos del dominio. Eso
+            # NO confirma que tengas cuenta activa allí (puede ser una cuenta
+            # antigua olvidada, o que la brecha no afecte tu cuenta). Bajamos
+            # a 'medium' para que el preflight de propiedad sea visible y para
+            # que el auto-resolver/process-all-auto excluyan estos hits hasta
+            # que tú confirmes "sí, tengo cuenta aquí".
+            confidence = "medium"
         elif source == "sherlock":
             confidence = _sherlock_confidence(identifier, hit)
         elif source == "maigret":

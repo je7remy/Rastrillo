@@ -16,14 +16,104 @@ Resumibilidad:
 """
 import hashlib
 import json
+import logging
 import random
+import re
 import string
 import time
+import urllib.error
+import urllib.request
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 from . import config, db, ai_assist, resolver, recipes_auto
 from .recipes import get_recipe
+
+_log = logging.getLogger("rastrillo.engine")
+
+# ── Endurecimiento contra falsos "deleted" ──────────────────────────────────
+# Una redirección a una página de login también cambia la URL. Si la
+# heurística marcase eso como éxito, "deleted" se sellaría sin haber borrado
+# nada y perderías la oportunidad de hacer seguimiento.
+_LOGIN_PATTERNS = re.compile(
+    r"(?:^|[/?&])(login|signin|sign-in|sign_in|auth|sso|session"
+    r"|account/login|users/login|connexion|anmelden|вход)"
+    r"(?:[/?&]|$)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_login_redirect(url: str) -> bool:
+    if not url:
+        return False
+    return bool(_LOGIN_PATTERNS.search(url))
+
+
+# Keywords multi-idioma que sugieren que un perfil dejó de existir.
+_GONE_KEYWORDS = [
+    "user not found", "account not found", "page not found",
+    "this account has been", "account has been deleted",
+    "account has been removed", "user does not exist",
+    "this user does not exist", "page doesn't exist",
+    "no se encontró", "usuario no existe", "cuenta eliminada",
+    "cuenta no existe", "página no encontrada",
+    "учётная запись удалена", "пользователь не найден",
+    "страница не найдена",
+    "compte supprimé", "page introuvable",
+    "konto wurde gelöscht", "seite nicht gefunden",
+]
+
+
+def revisit_profile(profile_url: str, timeout: float = 8.0):
+    """GET ligero (sin Playwright) sobre la URL del perfil para confirmar
+    su estado tras una acción de borrado.
+
+    Devuelve:
+      True   si responde 404 / 410, o si el body contiene keywords de "no
+             existe / cuenta cerrada" (en cualquier idioma soportado).
+      False  si responde 200 y el body NO contiene esas keywords (el perfil
+             probablemente sigue activo).
+      None   si no se puede determinar (timeout, error de red, redirect
+             extraño): el caller debe ser conservador y NO sellar deleted.
+    """
+    if not profile_url:
+        return None
+    try:
+        req = urllib.request.Request(
+            profile_url,
+            headers={"User-Agent": "rastrillo/0.1 (+post-deletion check)",
+                     "Accept-Language": "en,es,ru;q=0.8"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status = r.status
+            body = r.read(50_000).decode("utf-8", errors="ignore")
+            final_url = r.geturl() or profile_url
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 410):
+            return True
+        # 5xx / 403 / 429: ambiguo, no concluimos.
+        return None
+    except Exception as e:
+        _log.info("revisit_profile(%s) sin red: %s", profile_url, e)
+        return None
+    # Status 200 — buscamos señales positivas de eliminación en el body.
+    body_low = body.lower()
+    if any(kw in body_low for kw in _GONE_KEYWORDS):
+        return True
+    # Redirect a login post-cierre = ambiguo, no podemos confirmar borrado.
+    if _looks_like_login_redirect(final_url):
+        return None
+    return False
+
+
+def _body_has_deletion_keyword(page) -> bool:
+    """¿La página actual contiene texto de éxito de borrado?"""
+    try:
+        text = page.inner_text("body") or ""
+    except Exception:
+        return False
+    text = text.lower()
+    return any(kw in text for kw in _GONE_KEYWORDS) or "deleted" in text or "удалено" in text
 
 ADJ = ["azul", "lento", "gris", "vacio", "mudo", "lejano", "anonimo"]
 NOUN = ["usuario", "perfil", "cuenta", "nadie", "x", "ninguno"]
@@ -164,22 +254,20 @@ class Engine:
             outcome = result2["outcome"]
             reason = result2.get("reason") or reason
             if outcome == "done":
-                status = result2.get("result_status") or "deleted"
-                db.set_status(account_id, status, f"verificado por IA: {reason}")
-                self._shot(page, account_id, "final")
-                # Aprendizaje: el agente cerró el flujo → serializamos la
-                # secuencia como receta para que la próxima sea determinista.
-                # Combinamos el log del primer intento + el del rerun post-pausa.
-                full_log = list(result.get("log") or []) + list(result2.get("log") or [])
-                self._save_synthesized_recipe(account_id, host, url, full_log, status)
+                status_proposed = result2.get("result_status") or "deleted"
+                if self._confirm_and_seal(account_id, page, host,
+                                          status_proposed, reason):
+                    # Aprendizaje solo cuando el sellado fue real.
+                    full_log = list(result.get("log") or []) + list(result2.get("log") or [])
+                    self._save_synthesized_recipe(account_id, host, url, full_log, status_proposed)
                 return
 
         if outcome == "done":
-            status = result.get("result_status") or "deleted"
-            db.set_status(account_id, status, f"verificado por IA: {reason}")
-            self._shot(page, account_id, "final")
-            self._save_synthesized_recipe(account_id, host, url,
-                                          result.get("log") or [], status)
+            status_proposed = result.get("result_status") or "deleted"
+            if self._confirm_and_seal(account_id, page, host,
+                                      status_proposed, reason):
+                self._save_synthesized_recipe(account_id, host, url,
+                                              result.get("log") or [], status_proposed)
             return
 
         # Degradación a `semi_auto` (no a 'manual sin acción'): el usuario ve
@@ -201,6 +289,94 @@ class Engine:
             db.update_account(account_id, current_step=0, recipe_hash=h)
         elif not prev:
             db.update_account(account_id, recipe_hash=h)
+
+    def _confirm_and_seal(self, account_id, page, host, status_proposed, reason):
+        """Aplica el sellado de éxito con la verificación reforzada del Nivel 6
+        Parte 2. Devuelve True si selló como deleted/anonymized, False si lo
+        degradó a 'manual'.
+
+        Reglas:
+          - status_proposed != 'deleted'  → no aplica verificación adicional
+            (anonymized sigue su camino: la cuenta no desaparece, solo cambia
+            sus datos, no podemos confirmar con un GET).
+          - URL final del agente parece un redirect a login → manual.
+          - profile_url disponible → revisita HTTP.
+              True  → deleted confirmado.
+              False → manual con "la URL sigue cargando".
+              None  → manual con "no pude confirmar".
+          - sin profile_url → exigir 2 señales (URL cambió + keyword en body
+            de la página actual). Solo entonces deleted; sino manual.
+        """
+        acc = db.get_account(account_id)
+        profile_url = acc["profile_url"]
+        self._shot(page, account_id, "final")
+
+        if status_proposed != "deleted":
+            # anonymized u otros estados: confiamos en el agente como antes.
+            db.set_status(account_id, status_proposed, f"verificado por IA: {reason}")
+            return True
+
+        # Comprobación rápida del lado del browser: ¿estamos en una pantalla
+        # de login? Eso es ambiguo: pudo redirigirnos sin haber borrado nada.
+        try:
+            current_url = page.url or ""
+        except Exception:
+            current_url = ""
+        if _looks_like_login_redirect(current_url):
+            msg = (f"El agente dijo 'done' pero la URL actual parece una "
+                   f"pantalla de login ({current_url}). Verifica tú que la "
+                   f"cuenta está eliminada.")
+            db.set_status(account_id, "manual", msg)
+            return False
+
+        # Opción A: revisitar profile_url (más fiable).
+        if profile_url:
+            verdict = revisit_profile(profile_url)
+            if verdict is True:
+                db.set_status(
+                    account_id, "deleted",
+                    f"verificado: revisita a {profile_url} indica que no existe ({reason})",
+                )
+                return True
+            if verdict is False:
+                db.set_status(
+                    account_id, "manual",
+                    f"El agente reportó éxito pero {profile_url} sigue "
+                    f"cargando como cuenta activa. Revisa y, si está "
+                    f"realmente cerrada, marca como hecha desde la UI.",
+                )
+                return False
+            # verdict is None → no pude confirmar; conservador → manual.
+            db.set_status(
+                account_id, "manual",
+                f"El agente reportó éxito pero no pude confirmar el borrado "
+                f"haciendo una revisita a {profile_url} (sin red, timeout o "
+                f"respuesta ambigua). Verifica tú.",
+            )
+            return False
+
+        # Opción B: sin profile_url, exigimos dos señales en la página actual.
+        # Señal 1: la URL cambió (no es la URL de entrada del flujo).
+        # Señal 2: keyword de borrado en el body visible.
+        try:
+            entry_url = (acc["profile_url"] or "")
+        except Exception:
+            entry_url = ""
+        url_changed = bool(current_url) and current_url != entry_url
+        has_keyword = _body_has_deletion_keyword(page)
+        if url_changed and has_keyword:
+            db.set_status(
+                account_id, "deleted",
+                f"verificado: URL cambió + keyword en página ({reason})",
+            )
+            return True
+        # Una sola señal o ninguna → manual.
+        db.set_status(
+            account_id, "manual",
+            "El agente reportó éxito pero no pude confirmar con dos "
+            "señales (URL cambiada + keyword de borrado). Verifica tú.",
+        )
+        return False
 
     def _save_synthesized_recipe(self, account_id, host, url, agent_log, status):
         """Si el agente cerró el flujo, persistimos la secuencia como receta
