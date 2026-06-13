@@ -4,7 +4,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Herramienta local y privada para descubrir y borrar tus propias cuentas online"
 arch=('any')
-url="https://github.com/je7remy/rastrillo"
+url="https://github.com/je7remy/Rastrillo"
 license=('MIT')
 # Dependencias que sí están en repos oficiales/AUR comunes. Las marcadas
 # con (AUR) viven en el AUR; un helper tipo paru/yay las resolverá. Las

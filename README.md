@@ -4,7 +4,7 @@
 
 **Borra tus cuentas online de una sentada. Local, privado, human-in-the-loop.**
 
-[![CI](https://github.com/je7remy/rastrillo/actions/workflows/ci.yml/badge.svg)](https://github.com/je7remy/rastrillo/actions/workflows/ci.yml)
+[![CI](https://github.com/je7remy/Rastrillo/actions/workflows/ci.yml/badge.svg)](https://github.com/je7remy/Rastrillo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)](pyproject.toml)
@@ -110,7 +110,7 @@ listo).
 ### Linux / macOS
 
 ```bash
-git clone https://github.com/je7remy/rastrillo.git
+git clone https://github.com/je7remy/Rastrillo.git
 cd rastrillo
 bash install.sh
 ```

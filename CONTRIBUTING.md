@@ -8,7 +8,7 @@ moverte por el repo sin romper nada.
 Clona, instala y verifica:
 
 ```bash
-git clone https://github.com/je7remy/rastrillo.git
+git clone https://github.com/je7remy/Rastrillo.git
 cd rastrillo
 bash install.sh        # Linux/Mac
 # .\install.ps1        # Windows PowerShell

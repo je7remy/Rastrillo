@@ -1,3 +1,0 @@
-[console_scripts]
-rastrillo = cli:main
-rs = cli:main
