@@ -44,6 +44,7 @@
 - [Troubleshooting](#-troubleshooting)
 - [Contribuir](#-contribuir)
 - [Seguridad](#-seguridad)
+- [Transparencia y modelo de amenazas](#-transparencia-y-modelo-de-amenazas)
 - [Créditos](#-créditos)
 - [Licencia](#-licencia)
 
@@ -576,6 +577,17 @@ Invariantes que facilitan el threat model:
 - Allowlist de hosts contra DNS rebinding.
 - SSRF guard en el resolver (solo HTTPS, IPs públicas).
 - Backup + audit antes de cualquier acción destructiva.
+
+Para el inventario completo de tráfico saliente (qué se envía, cuándo y
+con qué archivo:línea verificarlo) y el modelo de amenazas, ver
+[**TRANSPARENCIA.md**](TRANSPARENCIA.md).
+
+---
+
+## 🔎 Transparencia y modelo de amenazas
+
+Cada conexión que Rastrillo abre, cada dato que sale del proceso, y cómo
+comprobarlo tú mismo leyendo el código: [**TRANSPARENCIA.md**](TRANSPARENCIA.md).
 
 ---
 
