@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -55,6 +56,32 @@ def _env_int(name, default):
         return max(10, int(os.environ.get(name, "") or default))
     except ValueError:
         return default
+
+
+# --- Resolución portable de binarios externos -------------------------------
+def _resolve_tool(name: str):
+    """Ruta del ejecutable de una herramienta CLI, o None si no está.
+
+    Sherlock/Holehe/Maigret se instalan en el MISMO directorio que el
+    intérprete que corre Rastrillo (``.venv/bin`` en Linux/Mac,
+    ``.venv\\Scripts`` en Windows; igual con pipx). Ese directorio NO está en
+    PATH cuando se arranca por el wrapper sin activar el venv, así que
+    ``subprocess(["sherlock", ...])`` —que resuelve solo por PATH— falla con
+    FileNotFoundError. En Windows "funcionaba" solo si había además una copia
+    global en PATH; en Linux no la hay y el scan vuelve vacío.
+
+    Estrategia portable (sin ramas por SO):
+      1) buscar junto a ``sys.executable`` (el bin del venv).
+      2) caer a PATH para instalaciones globales o pipx separados.
+    ``shutil.which`` resuelve la extensión correcta (.exe) vía PATHEXT en
+    Windows, de modo que no hardcodeamos sufijos.
+    """
+    bindir = os.path.dirname(sys.executable or "")
+    if bindir:
+        found = shutil.which(name, path=bindir)
+        if found:
+            return found
+    return shutil.which(name)
 
 
 # --- Validación de input ----------------------------------------------------
@@ -155,13 +182,18 @@ def run_sherlock(username, timeout=None, per_site_timeout=None):
         "RASTRILLO_SHERLOCK_SITE_TIMEOUT", _DEF_SHERLOCK_PER_SITE,
     )
 
+    exe = _resolve_tool("sherlock")
+    if not exe:
+        return {"hits": [], "error": "Sherlock no instalado (pip install sherlock-project)",
+                "incomplete": True, "raw_count": 0}
+
     hits = []
     error = None
     incomplete = False
 
     with tempfile.TemporaryDirectory() as tmp:
         cmd = [
-            "sherlock", username,
+            exe, username,
             "--no-color", "--no-txt", "--csv",
             "--folderoutput", tmp,
             "--timeout", str(per_site),
@@ -228,13 +260,18 @@ def run_holehe(email, timeout=None):
 
     timeout = timeout or _env_int("RASTRILLO_HOLEHE_TIMEOUT", _DEF_HOLEHE_TIMEOUT)
 
+    exe = _resolve_tool("holehe")
+    if not exe:
+        return {"hits": [], "error": "Holehe no instalado (pip install holehe)",
+                "incomplete": True, "raw_count": 0}
+
     hits = []
     error = None
     incomplete = False
     proc = None
 
     with tempfile.TemporaryDirectory() as tmp:
-        cmd = ["holehe", email, "--only-used", "--no-color", "--no-clear", "-C"]
+        cmd = [exe, email, "--only-used", "--no-color", "--no-clear", "-C"]
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True,
@@ -297,7 +334,7 @@ def _read_holehe_csv(path: Path):
 def maigret_available() -> bool:
     """True si el binario `maigret` está en PATH. Comprueba en cada llamada
     para soportar instalación a runtime sin reiniciar Rastrillo."""
-    return shutil.which("maigret") is not None
+    return _resolve_tool("maigret") is not None
 
 
 def run_maigret(username, timeout=None):
@@ -316,7 +353,8 @@ def run_maigret(username, timeout=None):
         return {"hits": [], "error": f"username inválido: {username!r}",
                 "incomplete": False, "raw_count": 0, "skipped": False}
 
-    if not maigret_available():
+    exe = _resolve_tool("maigret")
+    if not exe:
         return {"hits": [], "error": None, "incomplete": False,
                 "raw_count": 0, "skipped": True}
 
@@ -331,7 +369,7 @@ def run_maigret(username, timeout=None):
         # `--no-progressbar` mantiene stdout limpio. `--timeout 15` es por-sitio
         # (el global del subprocess lo manejamos nosotros).
         cmd = [
-            "maigret", username,
+            exe, username,
             "--json", "simple",
             "--folderoutput", tmp,
             "--no-progressbar",
