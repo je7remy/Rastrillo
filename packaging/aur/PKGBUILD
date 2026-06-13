@@ -1,0 +1,68 @@
+# Maintainer: Jeremy <je7remy@gmail.com>
+pkgname=rastrillo
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Herramienta local y privada para descubrir y borrar tus propias cuentas online"
+arch=('any')
+url="https://github.com/je7remy/rastrillo"
+license=('MIT')
+# Dependencias que sí están en repos oficiales/AUR comunes. Las marcadas
+# con (AUR) viven en el AUR; un helper tipo paru/yay las resolverá. Las
+# que no están como paquetes (sherlock-project y holehe a veces faltan)
+# se instalan vía pip junto al venv del proyecto — ver postinstall.
+depends=(
+    'python'
+    'python-fastapi'
+    'python-uvicorn'
+    'python-jinja'
+    'python-rich'
+    'python-pydantic'
+    'python-reportlab'
+    'python-anthropic'  # (AUR) opcional en runtime; el código degrada sin clave
+    'python-playwright' # (AUR) navegador Chromium aparte; ver postinstall
+)
+# Las tools de descubrimiento (sherlock, holehe, maigret) son opcionales.
+# Si no las quieres como pip y el AUR tiene paquete, descoméntalas.
+optdepends=(
+    'sherlock: cobertura por username (paquete AUR sherlock-git o pip install sherlock-project)'
+    'holehe: cobertura por email (pip install holehe)'
+    'maigret: cobertura extendida por username (pip install maigret)'
+)
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+# El tarball del tag de GitHub es el source canónico. Cuando OWNER/repo
+# tenga tag v$pkgver creado, descomenta este `source` y genera el
+# checksum: `makepkg -g >> PKGBUILD`. Mientras tanto se queda como SKIP.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    python -m build --wheel --no-isolation
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+
+    # Licencia (convención Arch).
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    # README opcional bajo /usr/share/doc.
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
+
+# ── Notas post-install (no las ejecuta makepkg; documentan al usuario) ──
+# 1. Chromium NO se empaqueta aquí (es un binario pesado que Playwright
+#    descarga aparte). Después de instalar el paquete corre UNA vez:
+#       playwright install chromium
+#    Esto deja Chromium en ~/.cache/ms-playwright/. Si más tarde lo
+#    actualizas, vuelve a correr el mismo comando.
+#
+# 2. Sherlock y holehe pueden no estar disponibles como paquetes Arch
+#    en el momento de instalar. Alternativa portable:
+#       pipx install sherlock-project
+#       pipx install holehe
+#    Rastrillo los detecta en PATH y los usa automáticamente.
+#
+# 3. Para regenerar .SRCINFO tras editar el PKGBUILD:
+#       makepkg --printsrcinfo > .SRCINFO

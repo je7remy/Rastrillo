@@ -7,6 +7,7 @@ name = "rastrillo"
 version = "0.1.0"
 description = "Rastrillo: herramienta local y privada que rastrea tu huella digital, encuentra tus cuentas regadas por la web y las borra o anonimiza de un solo pase, dejando solo las que quieres conservar."
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = [
     "playwright>=1.44",
@@ -33,4 +34,7 @@ packages = ["rastrillo"]
 py-modules = ["cli"]
 
 [tool.setuptools.package-data]
-rastrillo = ["recipes/*.json"]
+# Tarea 10: el frontend vive en rastrillo/static/ (index.html + styles.css
+# + app.js). Sin esta entrada los wheels no llevan los assets y `pip
+# install rastrillo` deja el dashboard sin CSS/JS.
+rastrillo = ["recipes/*.json", "static/*"]

@@ -166,15 +166,18 @@ class TestUIExposure(IsolatedTestCase):
         self.client = auth_client()
 
     def test_html_tiene_filtro_y_helper(self):
+        # Desde Tarea 10 el JS vive en /static/app.js; el HTML solo tiene
+        # la estructura. Buscamos los marcadores donde realmente residen.
         html = self.client.get("/").text
-        self.assertIn('data-f="exposure"', html)
-        self.assertIn("isExposure", html)
-        self.assertIn("confirmAccount", html)
-        self.assertIn("/api/accounts/", html)
-        self.assertIn("confirm-account", html)
-        # Texto del banner explicativo
+        app_js = self.client.get("/static/app.js").text
+        self.assertIn('data-f="exposure"', html)        # botón filtro: HTML
+        self.assertIn("isExposure", app_js)             # helper JS
+        self.assertIn("confirmAccount", app_js)         # función JS
+        self.assertIn("/api/accounts/", app_js)         # rutas API que usa el JS
+        self.assertIn("confirm-account", app_js)
+        # Texto del banner explicativo (vive en el JS que lo inyecta).
         self.assertIn("No son cuentas confirmadas".lower(),
-                      html.lower().replace("estas no son cuentas confirmadas",
-                                           "no son cuentas confirmadas"))
+                      app_js.lower().replace("estas no son cuentas confirmadas",
+                                             "no son cuentas confirmadas"))
         # El botón "Sí, tengo cuenta" está en el JS
-        self.assertIn("tengo cuenta", html)
+        self.assertIn("tengo cuenta", app_js)

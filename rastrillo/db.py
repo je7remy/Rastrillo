@@ -123,8 +123,22 @@ ALTER TABLE accounts__new RENAME TO accounts;
 @contextmanager
 def connect():
     config.ensure_dirs()
-    con = sqlite3.connect(config.DB_PATH)
+    # timeout=30: el resolver tiene un ThreadPoolExecutor (varios hilos
+    # escribiendo a la vez en `discovered.json` y, vía jobs, en la DB).
+    # Sin timeout, SQLite levanta "database is locked" al primer
+    # solapamiento; con 30 s damos margen para que el lock libere.
+    con = sqlite3.connect(config.DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
+    # PRAGMA synchronous es POR CONEXIÓN (no persiste como journal_mode):
+    # aplicarlo solo en init() no surte efecto a runtime. Lo seteamos aquí
+    # para que cada conexión use NORMAL (durabilidad razonable con WAL
+    # activo) en vez del FULL por defecto.
+    try:
+        con.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        # Si el pragma falla por algún motivo (DB corrupta, etc.) seguimos:
+        # peor caso es durabilidad FULL, no rompemos nada.
+        pass
     try:
         yield con
         con.commit()
@@ -134,6 +148,17 @@ def connect():
 
 def init():
     with connect() as con:
+        # 0) PRAGMAs de durabilidad/concurrencia. journal_mode=WAL es
+        # PERSISTENTE por archivo de DB (sobrevive a reconexiones), así que
+        # ejecutarlo en init() basta. synchronous=NORMAL es por conexión,
+        # pero combinado con WAL da la durabilidad razonable para nuestro
+        # uso (writes frecuentes desde el pool del resolver) sin sufrir
+        # bloqueos de fsync agresivos. Crea ficheros -wal y -shm junto
+        # al .db; snapshot_db() los consolida con wal_checkpoint(TRUNCATE)
+        # antes de copiar para no llevarse un .db a medias.
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+
         # 1) Tablas (CREATE IF NOT EXISTS): respeta DBs viejas sin tocarlas.
         con.executescript(SCHEMA_TABLES)
 
@@ -260,6 +285,16 @@ def snapshot_db() -> Optional[Path]:
     backup_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     target = backup_dir / f"rastrillo_{ts}.db"
+    # Con WAL activo, los writes recientes viven en `<db>-wal` y solo se
+    # consolidan al rotar el log. Copiar el .db a pelo dejaría fuera esos
+    # cambios. wal_checkpoint(TRUNCATE) fuerza el merge y vacía el WAL.
+    try:
+        with connect() as con:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error as e:
+        # No abortamos: si la consolidación falla seguimos copiando lo que
+        # haya; mejor un backup parcial que ninguno.
+        _log.warning("wal_checkpoint falló antes del snapshot: %s", e)
     # copy2 preserva metadatos y respeta locks de SQLite mejor que copyfile
     # en Windows; aún así, idealmente nadie está escribiendo en este momento.
     shutil.copy2(config.DB_PATH, target)

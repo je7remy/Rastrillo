@@ -1,5 +1,7 @@
 # Rastrillo
 
+[![CI](https://github.com/je7remy/rastrillo/actions/workflows/ci.yml/badge.svg)](https://github.com/je7remy/rastrillo/actions/workflows/ci.yml)
+
 Monté esto porque acumulé una cantidad ridícula de cuentas online en quince
 años y no me apetecía pasar dos tardes pinchando "close account" en cada
 sitio. Le das un username o un correo, busca dónde tienes cuentas, decide
@@ -57,9 +59,55 @@ pip install -e .
 playwright install chromium
 ```
 
+Para una instalación **reproducible** (CI, releases, `pip-audit`) usa el
+lockfile con versiones fijadas:
+
+```
+pip install -r requirements.lock
+```
+
+Regenerar el lock cuando cambien las dependencias o salgan parches de
+seguridad:
+
+```
+pip install pip-tools
+python -m piptools compile pyproject.toml -o requirements.lock
+```
+
+`pip-tools` es solo herramienta de build; **no** es dependencia del
+proyecto y no debe acabar en `pyproject.toml`.
+
 `anthropic` es opcional. Sin clave API las capas que usan IA se saltan; el
 programa sigue funcionando con links del directorio JustDeleteMe y
 borradores GDPR plantillados.
+
+## Instalación en Arch (AUR)
+
+`packaging/aur/PKGBUILD` está preparado para empaquetar Rastrillo como
+paquete Arch. Cuando exista un tag `v0.1.0` en el repo de GitHub
+(`OWNER/rastrillo`), construye e instala así:
+
+```
+cd packaging/aur
+makepkg -si
+```
+
+Genera o regenera `.SRCINFO` cuando edites el PKGBUILD:
+
+```
+makepkg --printsrcinfo > .SRCINFO
+```
+
+Después de instalar, deja Chromium en su caché con:
+
+```
+playwright install chromium
+```
+
+(No empaquetamos el binario de Chromium: lo descarga Playwright a
+`~/.cache/ms-playwright/`.) `sherlock` y `holehe` no siempre están como
+paquete Arch; si faltan, instálalos con `pipx install sherlock-project`
+y `pipx install holehe` — Rastrillo los detecta en `PATH`.
 
 ## Uso
 
@@ -70,6 +118,23 @@ rastrillo
 En Windows tienes `.\rastrillo.ps1` o doble-click en `rastrillo.cmd`. En
 Linux/Mac, `./rastrillo.sh`. Cualquiera de ellos arranca el servidor local y
 abre el navegador con el token en la URL.
+
+### CLI (modo terminal, sin abrir UI)
+
+Para tareas auxiliares que no requieren navegador:
+
+```
+rastrillo scan --user je7remy --email tu@correo.com   # discovery headless
+rastrillo list [--status STATUS]                       # lista cuentas en DB
+rastrillo report --format json|csv|pdf --out FILE      # exporta informe
+```
+
+`rastrillo --help` y `rastrillo SUBCMD --help` enseñan todas las opciones.
+
+**Invariante**: el modo CLI **no** ejecuta acciones destructivas headless.
+`scan` solo descubre, `report` solo exporta, `list` solo lee. El borrado
+y la anonimización siguen exigiendo dashboard web + Chromium con pausas
+para CAPTCHA/2FA (human-in-the-loop). Eso no cambia.
 
 Desde la web:
 
@@ -179,6 +244,8 @@ cookies ni contraseñas.
 |---|---|---|
 | `RASTRILLO_HOME` | `~/.rastrillo` | Cambiar dónde vive todo |
 | `RASTRILLO_TOKEN` | aleatorio por arranque | Token de auth del servidor local |
+| `RASTRILLO_ALLOWED_HOSTS` | `127.0.0.1:8765,localhost:8765,testserver` | Hosts permitidos en el header `Host` (anti DNS rebinding) |
+| `RASTRILLO_ALLOW_QUERY_TOKEN` | off | **Solo para tests.** Acepta `?token=` en la query. En producción el token solo viaja por header `X-Rastrillo-Token`. |
 | `RASTRILLO_DRY_RUN` | off | Modo simulación al arrancar |
 | `ANTHROPIC_API_KEY` | — | Activa el agente IA y la búsqueda web |
 | `RASTRILLO_AI_MODEL` | `claude-sonnet-4-6` | Modelo de Anthropic a usar |
@@ -205,3 +272,7 @@ python -m unittest discover -t . -s tests
 ```
 
 Son unos 30 segundos.
+
+## Licencia
+
+MIT. Ver [LICENSE](LICENSE). Copyright (c) 2026 Jeremy &lt;je7remy@gmail.com&gt;.

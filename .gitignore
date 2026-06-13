@@ -1,4 +1,3 @@
-@"
 # Python
 __pycache__/
 *.py[cod]
@@ -21,4 +20,6 @@ rastrillo-*.csv
 Thumbs.db
 .idea/
 .vscode/
-"@ | Set-Content -Encoding utf8 .gitignore
+
+# Carpeta de Claude Code local (settings/permisos por máquina)
+.claude/

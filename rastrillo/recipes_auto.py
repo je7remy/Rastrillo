@@ -25,27 +25,16 @@ Diseño y seguridad:
 from __future__ import annotations
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import config
+# Tarea 9: el slug usado para nombrar la receta auto-generada vive ahora
+# en hostutil; antes había una copia local idéntica a discovery._slugify.
+from .hostutil import slugify as _slug
 
 log = logging.getLogger("rastrillo.recipes_auto")
-
-
-def _slug(host: str) -> str:
-    """Mismo criterio que en discovery/_slugify: primer token del host, sin TLD."""
-    s = (host or "").strip().lower()
-    if "//" in s:
-        s = s.split("//", 1)[1]
-    s = s.split("/", 1)[0]
-    for pfx in ("www.", "m.", "old.", "new."):
-        if s.startswith(pfx):
-            s = s[len(pfx):]
-    s = s.split(".", 1)[0]
-    return re.sub(r"[^a-z0-9]+", "", s)
 
 
 def _build_steps(start_url: str, agent_log: List[dict]) -> List[dict]:

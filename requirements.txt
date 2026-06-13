@@ -1,3 +1,6 @@
+# requirements.txt — RANGOS para instalación flexible.
+# Para reproducibilidad bit-a-bit (CI, releases, pip-audit) usa
+# `requirements.lock` (versiones fijas, regenerable con pip-compile).
 playwright>=1.44
 fastapi>=0.110
 uvicorn[standard]>=0.29

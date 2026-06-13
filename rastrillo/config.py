@@ -26,8 +26,24 @@ KEEP_PLATFORMS = {"tiktok", "instagram", "linkedin", "github"}
 
 # Auth local del servidor: token aleatorio por arranque, override por env para
 # tests. El frontend lo recibe en la URL inicial y lo guarda en sessionStorage.
-# Todos los POST exigen el token; los GET son libres (lectura).
+# Todos los POST y los GET de /api/* exigen el token; GET / (HTML shell) queda
+# fuera porque el navegador entra sin header en la primera carga.
 AUTH_TOKEN: str = os.environ.get("RASTRILLO_TOKEN") or secrets.token_urlsafe(24)
+
+# Allowlist de Host válidos para neutralizar DNS rebinding: un atacante en
+# la misma red podría apuntar un DNS público a 127.0.0.1 y, si el navegador
+# manda ese host, hablar con nuestro servidor saltándose la SOP. Solo
+# permitimos el origen real del servidor local.
+#
+# `testserver` está incluido porque es el Host que usa fastapi.testclient
+# por defecto y no resuelve a nada en internet: aceptarlo no abre superficie.
+# Se puede ampliar con la env RASTRILLO_ALLOWED_HOSTS (lista separada por comas).
+ALLOWED_HOSTS: set = {
+    h.strip()
+    for h in (os.environ.get("RASTRILLO_ALLOWED_HOSTS")
+              or "127.0.0.1:8765,localhost:8765,testserver").split(",")
+    if h.strip()
+}
 
 # Dry-run global: el motor no ejecuta acciones destructivas; las simula. Se
 # activa por env o desde el toggle del dashboard. Mutable a runtime.

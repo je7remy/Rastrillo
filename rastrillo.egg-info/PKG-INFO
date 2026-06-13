@@ -12,6 +12,7 @@ Requires-Dist: rich>=13.7
 Requires-Dist: sherlock-project>=0.15.0
 Requires-Dist: holehe>=1.61
 Requires-Dist: anthropic>=0.30
+Requires-Dist: reportlab>=4.0
 
 # Rastrillo
 
@@ -42,13 +43,13 @@ servidores externos.
 | Etapa | ¿Automático? |
 |---|---|
 | Descubrir cuentas (Sherlock + Holehe) | ✅ |
-| Abrir la página de borrado correcta | ✅ (recetas) |
-| Navegar el flujo de clicks conocido | ✅ (recetas) |
-| Encontrar el botón cuando no hay receta | ⚙️ best-effort (modo IA) |
-| Anonimizar perfiles sin borrado total | ✅ (plantilla) |
+| Saber dónde se borra cada plataforma | ✅ (directorio JustDeleteMe cacheado) |
+| Navegar el flujo de clicks | ✅ (IA en bucle; receta JSON si existe) |
+| Anonimizar perfiles sin borrado total | ✅ (IA) |
 | Progreso persistente + reanudar | ✅ (SQLite) |
 | Resolver CAPTCHA / 2FA | ❌ por diseño — te lo pide |
-| Confirmación final de borrado | 🙋 te lo pide (1 click/Enter) |
+| Confirmación final de borrado | 🙋 te lo pide (1 click en la web) |
+| Plataforma sin entrada en el directorio | 🙋 marca `manual` con el mejor link |
 
 ## Instalación
 
@@ -59,38 +60,62 @@ pip install -e .              # registra los comandos `rastrillo` y `rs`
 playwright install chromium
 ```
 
-`anthropic` es opcional: solo se usa para el **modo IA de respaldo**. Sin
-`ANTHROPIC_API_KEY` la herramienta funciona igual con las recetas fijas.
+`anthropic` es opcional. Si no defines `ANTHROPIC_API_KEY`, la IA queda
+desactivada y Rastrillo cae a degradación elegante: te muestra en el dashboard
+el link de borrado de cada plataforma (del directorio) para que lo termines
+tú con un clic.
 
 ## Uso
 
 ```bash
-# 1. Descubrir
-rastrillo scan -u je7remy -e tucorreo@gmail.com
-
-# 2. Revisar (TikTok/Instagram/LinkedIn/GitHub salen como "conservada" solas)
-rastrillo list
-rastrillo skip spotify              # conservar algo más, opcional
-
-# 3. Dashboard en vivo (otra terminal)
-rastrillo dashboard                 # http://127.0.0.1:8765
-
-# 4. Ejecutar. Se abre el navegador; cuando toque CAPTCHA/2FA te avisa por la terminal.
-rastrillo run
-rs run --only reddit                # `rs` es el alias corto
+rastrillo
 ```
 
-Si no quieres instalar el paquete, `python cli.py <subcomando>` funciona igual.
+En Windows, si no quieres activar el venv cada vez, hay wrappers en la raíz
+del repo:
 
-## Añadir / arreglar plataformas (extensible)
+```powershell
+.\rastrillo.ps1            # PowerShell
+.\rastrillo.cmd            # cmd / doble-click desde el Explorador
+```
 
-Las webs cambian su HTML, así que las recetas se rompen con el tiempo. **No tocas
-código**: copias un JSON de `rastrillo/recipes/` a `~/.rastrillo/recipes/`, ajustas
-los selectores y listo (tus recetas pisan las del paquete). El esquema completo
-está documentado en `rastrillo/recipes.py`.
+Eso es todo. Levanta el dashboard local en `http://127.0.0.1:8765` y abre el
+navegador automáticamente. Desde la web:
 
-Pasos disponibles: `goto`, `ensure_login`, `click`, `fill`, `fill_random`,
-`wait_for`, `ai_assist`, `pause`, `verify`.
+1. Mete usernames y/o correos en el formulario y pulsa **Escanear**. Sherlock y
+   Holehe corren en segundo plano; los hallazgos aparecen solos.
+2. Para cada cuenta, decide con un click: **Eliminar**, **Anonimizar** o
+   **Conservar**. TikTok/Instagram/LinkedIn/GitHub salen como conservadas solas.
+3. Cuando una plataforma exija CAPTCHA/2FA, Rastrillo abre la ventana de
+   Chromium y la fila pasa a **Esperándote**. Resuélvelo en el navegador y
+   pulsa **Ya lo resolví, continuar** desde la web.
+
+La terminal solo arranca el servidor y se queda viva (Ctrl+C para salir). Para
+debug rápido sin abrir UI están `rastrillo list` y `rastrillo run`.
+
+Si no quieres instalar el paquete, `python cli.py` funciona igual.
+
+## ¿Cómo decide Rastrillo qué hacer con cada cuenta?
+
+Tres caminos, por orden:
+
+1. **Receta JSON** (`rastrillo/recipes/<plataforma>.json` o
+   `~/.rastrillo/recipes/<plataforma>.json`). Es el fast-path más fiable; las
+   del paquete son ejemplos para reddit, tumblr, pinterest, discord, spotify.
+2. **Directorio + IA** (caso por defecto): se descarga al primer arranque el
+   dataset abierto de [JustDeleteMe](https://justdelete.me) (~2500 sitios) y
+   se cachea en `~/.rastrillo/directory.json`. Para cada cuenta, el motor
+   abre la URL de borrado del directorio y un agente IA conduce el flujo.
+3. **Manual con link** (degradación elegante): si no hay receta, ni entrada
+   del directorio, ni IA disponible, la fila queda en `manual` con el mejor
+   link disponible para que la cierres con un clic.
+
+Refrescar el directorio: botón "↻ Directorio" en la web, o
+`POST /api/directory/refresh`.
+
+Tú **no tienes que escribir recetas**. Solo crea una si quieres tener un
+fast-path muy fiable para un sitio concreto. El esquema está documentado en
+[rastrillo/recipes.py](rastrillo/recipes.py).
 
 ## Privacidad
 

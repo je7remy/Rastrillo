@@ -9,7 +9,10 @@
   - dry-run no encola y deja status='dry_run'.
   - process-all-auto solo toca owned=1 y status=found.
   - not_mine no se procesa por process-all-auto.
-  - Token: POST sin token → 401, con token → 200; GET libre.
+  - Token: POST sin token → 401, con token → 200.
+  - Token: GET /api/* sin token → 401, con token → 200 (Tarea 3).
+  - GET / (HTML shell) sigue libre porque el navegador entra sin header.
+  - Host: header Host no en config.ALLOWED_HOSTS → 403 (anti DNS-rebinding).
 """
 from .helpers import IsolatedTestCase, auth_client
 
@@ -29,8 +32,30 @@ class TestStateTransitions(IsolatedTestCase):
         r = self.client.post("/api/scan", json={"usernames":["x"]})
         self.assertEqual(r.status_code, 401)
 
-    def test_get_no_requiere_token(self):
-        self.assertEqual(self.client.get("/api/accounts").status_code, 200)
+    def test_get_api_sin_token_es_401(self):
+        """Tarea 3: los GET de /api/* devuelven PII (cuentas, reports) y por
+        tanto exigen token. Antes eran libres; ya no."""
+        self.assertEqual(self.client.get("/api/accounts").status_code, 401)
+
+    def test_get_api_con_token_es_200(self):
+        self.assertEqual(
+            self.client.get("/api/accounts", headers=self.hdr()).status_code,
+            200,
+        )
+
+    def test_get_root_no_requiere_token(self):
+        """GET / (HTML shell) sigue libre: el navegador entra sin header en
+        la primera carga; el JS lee `?token=` y lo manda en /api/*."""
+        self.assertEqual(self.client.get("/").status_code, 200)
+
+    def test_host_no_permitido_es_403(self):
+        """Anti DNS-rebinding: aunque venga el token, un Host fuera de la
+        allowlist se rechaza antes."""
+        r = self.client.get("/api/accounts", headers={
+            **self.hdr(),
+            "Host": "evil.example.com",
+        })
+        self.assertEqual(r.status_code, 403)
 
     # ── triage ──
     def test_own_true_marca_owned(self):

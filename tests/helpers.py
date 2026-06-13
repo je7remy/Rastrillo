@@ -33,6 +33,10 @@ class IsolatedTestCase(unittest.TestCase):
         self.HOME = Path(tempfile.mkdtemp(prefix="rastrillo-test-"))
         os.environ["RASTRILLO_HOME"] = str(self.HOME)
         os.environ["RASTRILLO_TOKEN"] = self.TOKEN
+        # Tarea 5: por defecto el server NO acepta ?token= en la query (el
+        # token solo entra por header X-Rastrillo-Token). Los tests sí lo
+        # usan para no tener que rescribirlos, así que lo habilitamos aquí.
+        os.environ["RASTRILLO_ALLOW_QUERY_TOKEN"] = "1"
         os.environ.pop("ANTHROPIC_API_KEY", None)
         os.environ.pop("RASTRILLO_HIBP_API_KEY", None)
         os.environ.pop("RASTRILLO_DRY_RUN", None)
@@ -40,6 +44,7 @@ class IsolatedTestCase(unittest.TestCase):
 
     def tearDown(self):
         _purge_rastrillo_modules()
+        os.environ.pop("RASTRILLO_ALLOW_QUERY_TOKEN", None)
         try:
             shutil.rmtree(self.HOME, ignore_errors=True)
         except Exception:

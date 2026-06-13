@@ -172,7 +172,10 @@ class TestThrottleYCache(IsolatedTestCase):
                 self.resolver._last_fetch_by_host.clear()
 
             # Mockeamos urlopen para que retorne rápido, así el delay observado
-            # es puramente el throttle.
+            # es puramente el throttle. Tarea 6: además parcheamos
+            # socket.getaddrinfo para que la allowlist SSRF acepte el host
+            # ficticio (de lo contrario `x.test` no resuelve y _http_get
+            # cortaría antes del throttle).
             class _R:
                 status = 200
                 def read(self, _=None): return b"<html></html>"
@@ -181,7 +184,9 @@ class TestThrottleYCache(IsolatedTestCase):
                 def __exit__(self, *a): pass
 
             with patch("rastrillo.resolver.urllib.request.urlopen",
-                       return_value=_R()):
+                       return_value=_R()), \
+                 patch("socket.getaddrinfo",
+                       return_value=[(2, 1, 6, "", ("8.8.8.8", 0))]):
                 t0 = time.time()
                 self.resolver._http_get("https://x.test/a")
                 self.resolver._http_get("https://x.test/b")
@@ -204,8 +209,11 @@ class TestThrottleYCache(IsolatedTestCase):
                 def geturl(self): return "https://x/"
                 def __enter__(self): return self
                 def __exit__(self, *a): pass
+            # Tarea 6: ver nota en el test anterior.
             with patch("rastrillo.resolver.urllib.request.urlopen",
-                       return_value=_R()):
+                       return_value=_R()), \
+                 patch("socket.getaddrinfo",
+                       return_value=[(2, 1, 6, "", ("8.8.8.8", 0))]):
                 t0 = time.time()
                 self.resolver._http_get("https://a.test/x")
                 self.resolver._http_get("https://b.test/x")
@@ -224,15 +232,16 @@ class TestUIFases(IsolatedTestCase):
         self.client = auth_client()
 
     def test_html_lee_fase_y_total(self):
-        html = self.client.get("/").text
-        # Los nuevos marcadores deben aparecer en el JS
-        self.assertIn('scanRes.phase', html)
-        self.assertIn('scanRes.total', html)
-        self.assertIn('scanRes.resolved', html)
-        self.assertIn('Resolviendo', html)
-        self.assertIn('Descubriendo', html)
+        # Desde Tarea 10 el JS vive en /static/app.js; los marcadores que
+        # antes buscábamos en `GET /` ahora están ahí.
+        app_js = self.client.get("/static/app.js").text
+        self.assertIn('scanRes.phase', app_js)
+        self.assertIn('scanRes.total', app_js)
+        self.assertIn('scanRes.resolved', app_js)
+        self.assertIn('Resolviendo', app_js)
+        self.assertIn('Descubriendo', app_js)
         # Y en el cierre, "M resueltas"
-        self.assertIn('resueltas', html)
+        self.assertIn('resueltas', app_js)
 
     def test_scan_status_endpoint_devuelve_phase_y_resolved(self):
         """Aunque no haya scan corriendo, el dict tiene las claves esperadas."""
@@ -242,7 +251,9 @@ class TestUIFases(IsolatedTestCase):
             jobs._scan_status["phase"] = "resolving"
             jobs._scan_status["total"] = 10
             jobs._scan_status["resolved"] = 3
-        r = self.client.get("/api/scan/status").json()
+        # Desde Tarea 3 los GET de /api/* exigen token.
+        r = self.client.get("/api/scan/status",
+                            headers={"X-Rastrillo-Token": self.TOKEN}).json()
         self.assertEqual(r["phase"], "resolving")
         self.assertEqual(r["total"], 10)
         self.assertEqual(r["resolved"], 3)

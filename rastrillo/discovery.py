@@ -107,30 +107,9 @@ def _sherlock_confidence(username: str, hit: dict) -> str:
 
 
 # --- Slugify, host y matching de recetas ------------------------------------
-def _slugify(name: str) -> str:
-    """Normaliza 'Reddit', 'old.reddit.com' o una URL a 'reddit'."""
-    s = (name or "").strip().lower()
-    if "//" in s:
-        s = s.split("//", 1)[1]
-    s = s.split("/", 1)[0]
-    for prefix in ("www.", "m.", "old.", "new."):
-        if s.startswith(prefix):
-            s = s[len(prefix):]
-    s = s.split(".", 1)[0]
-    return re.sub(r"[^a-z0-9]+", "", s)
-
-
-def _host_from_url(url: str) -> str:
-    """Devuelve el host limpio de una URL ('reddit.com', 'old.reddit.com')."""
-    if not url:
-        return ""
-    s = url.strip().lower()
-    if "//" in s:
-        s = s.split("//", 1)[1]
-    s = s.split("/", 1)[0].split("?", 1)[0]
-    if s.startswith("www."):
-        s = s[4:]
-    return s
+# Tarea 9: la lógica vive en `rastrillo.hostutil`; aquí mantenemos los nombres
+# locales como aliases para no tocar todos los call sites internos.
+from .hostutil import slugify as _slugify, host_from_url as _host_from_url
 
 
 def _match_recipe(name, url, recipes):

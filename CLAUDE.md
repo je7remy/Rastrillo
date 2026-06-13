@@ -101,7 +101,19 @@ automático al arrancar si la caché supera `RASTRILLO_DIR_MAX_AGE_DAYS`
 `resolve(host, identifier)` siempre devuelve una Resolution. Throttle
 por dominio (`RASTRILLO_PROBE_DELAY`, default 1.5 s) para no parecer
 escaneo abusivo. Caché en `discovered.json`. Plantillas GDPR en 6
-idiomas (en, es, ru, pt-BR, fr, de), inicial y follow-up.
+idiomas (en, es, ru, pt-BR, fr, de), inicial y follow-up. `_http_get`
+incluye una allowlist anti-SSRF (`_is_safe_url`): solo `https://`,
+host debe resolver a IPs públicas — rechaza loopback, privadas,
+link-local, reservadas y multicast. Si la URL no pasa, devuelve None
+y el caller sigue con la siguiente sin abortar el lote.
+
+`rastrillo/hostutil.py` — normalización de host / slug compartida.
+Tres funciones con semánticas distintas (a propósito): `slugify` para
+casar recetas, `host_from_url` (con strip + corte de querystring) y
+`host_of` (sin strip, corta puerto, no corta querystring) para clave de
+throttle del resolver. La caracterización está congelada en
+`tests/test_hostutil_caracterizacion.py`; antes de cambiar nada aquí,
+asegúrate de que esos tests siguen verdes.
 
 `rastrillo/recipes.py` — loader de recetas JSON (opcionales). El usuario
 no debería tener que escribir ninguna.
@@ -133,8 +145,17 @@ independientes (URL cambiada + keyword en el body actual).
 Privacidad: solo envía estructura de página + texto visible, nunca
 cookies ni contraseñas.
 
-`rastrillo/server.py` — dashboard FastAPI. Middleware de auth en POST
-por token. Endpoints relevantes: `GET /` (HTML), `GET /api/accounts`,
+`rastrillo/server.py` — dashboard FastAPI. Middleware de auth: token
+exigido en TODOS los POST y en todos los GET de `/api/*`; `GET /` (HTML
+shell) queda fuera porque el navegador entra sin header. Además valida
+el header `Host` contra `config.ALLOWED_HOSTS` en TODAS las peticiones
+(anti DNS rebinding); fuera de la allowlist → 403. El frontend vive en
+`rastrillo/static/` (index.html + styles.css + app.js) y se sirve con
+`StaticFiles` bajo `/static/`; la **única** pieza dinámica del HTML es
+`window.__RASTRILLO_BOOT__`, inyectada por `_boot_script()` (hoy: solo
+`STATUS_META`). Si añades algo nuevo que el JS necesite al arrancar,
+ponlo ahí — no reintroduzcas placeholders en `index.html`. Endpoints
+relevantes: `GET /` (HTML), `GET /api/accounts`,
 `GET/POST /api/scan/*`, `GET /api/directory`,
 `POST /api/directory/refresh`,
 `POST /api/accounts/{id}/action` (delete/anonymize/keep/retry/continue),
@@ -240,6 +261,8 @@ Eso es lo que hace `test_engine_html_local.py`.
 |---|---|---|
 | `RASTRILLO_HOME` | `~/.rastrillo` | Raíz de todo |
 | `RASTRILLO_TOKEN` | aleatorio por arranque | Auth del servidor local |
+| `RASTRILLO_ALLOWED_HOSTS` | `127.0.0.1:8765,localhost:8765,testserver` | Hosts permitidos en el header `Host` (anti DNS rebinding) |
+| `RASTRILLO_ALLOW_QUERY_TOKEN` | off | **Solo para tests.** Acepta `?token=` en la query. En producción el token solo viaja por header `X-Rastrillo-Token`. |
 | `RASTRILLO_DRY_RUN` | off | Simulación al arrancar |
 | `ANTHROPIC_API_KEY` | — | Activa agente IA y web search |
 | `RASTRILLO_AI_MODEL` | `claude-sonnet-4-6` | Modelo de Anthropic |

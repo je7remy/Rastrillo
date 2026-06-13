@@ -15,9 +15,11 @@ Invariantes:
   - Funciona sin ANTHROPIC_API_KEY (salta capas 2 y 4; cae a 3 o 5).
 """
 from __future__ import annotations
+import ipaddress
 import json
 import logging
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -67,17 +69,10 @@ def _throttle(host: str) -> None:
         time.sleep(wait)
 
 
-def _host_of(url: str) -> str:
-    """Host normalizado para clave de throttle (sin www. ni puerto)."""
-    if not url:
-        return ""
-    s = url.lower()
-    if "//" in s:
-        s = s.split("//", 1)[1]
-    s = s.split("/", 1)[0].split(":", 1)[0]
-    if s.startswith("www."):
-        s = s[4:]
-    return s
+# Tarea 9: la normalización vive en hostutil; aquí mantenemos el alias
+# local para no tocar todos los callers (test de caracterización en
+# tests/test_hostutil_caracterizacion.py).
+from .hostutil import host_of as _host_of
 
 
 # --- Modelo de resultado ----------------------------------------------------
@@ -173,6 +168,54 @@ def detect_language(host: str) -> str:
 
 
 # --- HTTP helper -------------------------------------------------------------
+def _is_safe_url(url: str) -> bool:
+    """Allowlist anti-SSRF para `_http_get`.
+
+    Reglas:
+      - Solo `https://`. Bloqueamos http/file/ftp/gopher/etc.
+      - El host debe resolver a IPs PÚBLICAS exclusivamente. Cualquier IP
+        privada / loopback / link-local / reserved / multicast → no pasa.
+        Esto cubre 127.0.0.1, 10.x, 192.168.x, 169.254.x, IPv6 link-local,
+        etc.; suficiente para nuestro modelo de amenaza (resolver corre en
+        local del usuario y solo debe tocar internet, nunca hablar con el
+        propio dashboard ni con la red interna del usuario).
+
+    Aviso (TOCTOU): hay una ventana entre resolver el host y abrir la
+    conexión; un DNS rebinding podría devolver IP pública aquí y privada
+    a la hora de conectar. Para este modelo (local, single-user, la
+    respuesta solo alimenta una regex de emails) es aceptable; cerrarlo
+    requeriría un urlopen custom que pase la IP ya validada.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return False
+    if parsed.scheme != "https":
+        log.debug("SSRF guard: esquema no permitido %s en %s", parsed.scheme, url)
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as e:
+        log.debug("SSRF guard: no resuelve %s: %s", host, e)
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            log.debug("SSRF guard: IP no parseable %s para %s", ip_str, host)
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            log.debug("SSRF guard: rechazo %s -> %s (IP no pública)", host, ip)
+            return False
+    return True
+
+
 def _http_get(url: str, timeout: float = _HTTP_TIMEOUT) -> Optional[tuple[int, str, str]]:
     """GET sencillo con UA y captura tolerante. Devuelve (status, final_url, body)
     o None si revienta. Limitamos body a 200 KB.
@@ -180,7 +223,12 @@ def _http_get(url: str, timeout: float = _HTTP_TIMEOUT) -> Optional[tuple[int, s
     Throttle: aplicamos RASTRILLO_PROBE_DELAY entre dos GETs al mismo host
     (Tier 2.2). Si la petición falla por timeout, 403 o 429, devolvemos None
     y el caller sigue con el siguiente — no abortamos el lote.
+
+    Anti-SSRF (Tarea 6): antes del GET filtramos por `_is_safe_url`. El
+    caller no aborta el lote; simplemente recibe None y pasa al siguiente.
     """
+    if not _is_safe_url(url):
+        return None
     _throttle(_host_of(url))
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,

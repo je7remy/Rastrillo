@@ -130,7 +130,9 @@ class TestGDPRFollowupTemplates(IsolatedTestCase):
                 sent_at=time.time() - 45 * 86400,
             )
 
-            r = client.get(f"/api/accounts/{aid}/followup-draft")
+            # Desde Tarea 3 los GET de /api/* exigen token.
+            r = client.get(f"/api/accounts/{aid}/followup-draft",
+                           headers={"X-Rastrillo-Token": self.TOKEN})
             self.assertEqual(r.status_code, 200, f"[{lang}] {r.text}")
             data = r.json()
             self.assertEqual(data["language"], lang)
