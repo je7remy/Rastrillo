@@ -1,0 +1,16 @@
+{
+  "platform": "discord",
+  "display_name": "Discord",
+  "aliases": ["discord.com", "discordapp", "discordapp.com"],
+  "difficulty": "easy",
+  "deletion_type": "full",
+  "url": "https://discord.com/app",
+  "login_check": "[class*='avatar']",
+  "steps": [
+    {"action": "goto", "url": "https://discord.com/app"},
+    {"action": "ensure_login", "login_url": "https://discord.com/login", "check": "[class*='avatar']"},
+    {"action": "ai_assist", "goal": "abre User Settings > My Account y pulsa 'Delete Account'"},
+    {"action": "pause", "message": "Discord pide contrasena (y 2FA si la tienes). Confirma el borrado en el navegador, luego continua."},
+    {"action": "verify", "success_selector": "text=Log In", "on_success": "deleted"}
+  ]
+}

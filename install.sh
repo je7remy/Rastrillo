@@ -225,8 +225,17 @@ ok "Wrappers creados (rastrillo.sh, rs.sh)"
 echo
 printf "%sInstalacion completa.%s\n" "$C_GREEN" "$C_RESET"
 echo
-echo "Para arrancar Rastrillo:"
+echo "Para arrancar Rastrillo (via corta):"
 echo "    ./rastrillo.sh"
 echo
 echo "(O usa el alias corto: ./rs.sh)"
+echo
+echo "El ejecutable real vive en .venv/bin/rastrillo y esa carpeta NO esta"
+echo "en tu PATH global. Por eso 'rastrillo' a secas no se reconoce."
+echo "Si quieres el comando global, una opcion limpia:"
+echo
+echo "    pipx install ."
+echo
+echo "(Despues hay que descargar Chromium dentro del venv de pipx;"
+echo " ver README.md > Instalacion > pipx.)"
 echo

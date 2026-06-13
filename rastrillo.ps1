@@ -12,12 +12,11 @@ $exe  = Join-Path $here '.venv\Scripts\rastrillo.exe'
 
 if (-not (Test-Path $exe)) {
     Write-Host "El venv de Rastrillo no está creado todavía." -ForegroundColor Yellow
-    Write-Host "Para crearlo, desde esta misma carpeta ejecuta:" -ForegroundColor Yellow
+    Write-Host "Opción rápida (recomendada):" -ForegroundColor Yellow
+    Write-Host "    .\install.ps1" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  python -m venv .venv"
-    Write-Host "  .\.venv\Scripts\python.exe -m pip install -r requirements.txt"
-    Write-Host "  .\.venv\Scripts\python.exe -m pip install -e ."
-    Write-Host "  .\.venv\Scripts\python.exe -m playwright install chromium"
+    Write-Host "Si PowerShell bloquea el script:" -ForegroundColor Yellow
+    Write-Host "    powershell -ExecutionPolicy Bypass -File .\install.ps1" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Después vuelve a lanzar: .\rastrillo.ps1" -ForegroundColor Yellow
     exit 1

@@ -8,14 +8,12 @@ set "EXE=%HERE%.venv\Scripts\rastrillo.exe"
 if not exist "%EXE%" (
     echo.
     echo El venv de Rastrillo no esta creado todavia.
-    echo Para crearlo, desde esta misma carpeta ejecuta:
+    echo Opcion rapida - recomendada:
     echo.
-    echo   python -m venv .venv
-    echo   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-    echo   .\.venv\Scripts\python.exe -m pip install -e .
-    echo   .\.venv\Scripts\python.exe -m playwright install chromium
+    echo   .\install.ps1     - Windows PowerShell
+    echo   bash install.sh   - Linux/Mac
     echo.
-    echo Despues vuelve a lanzar: rastrillo.cmd
+    echo Despues vuelve a lanzar rastrillo.cmd o haz doble-click sobre el.
     exit /b 1
 )
 

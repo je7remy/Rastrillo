@@ -1,0 +1,144 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rastrillo</title>
+<!-- Tema: aplicado ANTES del CSS para evitar el flash (FOUC). Usa la
+     preferencia guardada o, en su defecto, prefers-color-scheme del SO. -->
+<script>
+(function(){
+  try{
+    var saved=localStorage.getItem("rastrillo-theme");
+    var sys=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme=saved||(sys?"dark":"light");
+  }catch(e){document.documentElement.dataset.theme="light"}
+})();
+</script>
+<link rel="stylesheet" href="/static/styles.css">
+</head><body>
+
+<!-- Topbar: marca + estado global del sistema (directorio + IA + refresh) -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">R</div>
+    <div>
+      <div class="brand-title">Rastrillo</div>
+      <div class="brand-sub">Tu huella digital, recogida y borrada</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <button id="dry-toggle" class="chip chip-toggle"
+            title="Modo simulación: nada destructivo se ejecuta"
+            aria-pressed="false"
+            aria-label="Modo simulación">
+      <span class="chip-dot"></span>
+      <span class="dry-label">Simulación</span>
+    </button>
+    <div id="chip-dir" class="chip" title="Estado del directorio de borrado"></div>
+    <div id="chip-ai" class="chip" title="Estado del modo IA"></div>
+    <button id="dir-refresh" class="btn btn-icon btn-ghost"
+            aria-label="Refrescar directorio"
+            title="Refrescar directorio"></button>
+    <a id="report-csv-btn" class="btn btn-sm btn-ghost"
+       href="/api/report?format=csv" download
+       title="Descargar informe en CSV (apto para análisis)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+      CSV
+    </a>
+    <a id="report-pdf-btn" class="btn btn-sm btn-ghost"
+       href="/api/report?format=pdf" download
+       title="Descargar informe en PDF (listo para imprimir/archivar)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M9 13h6M9 17h4"/></svg>
+      PDF
+    </a>
+    <button id="theme-toggle" class="btn btn-icon btn-ghost"
+            aria-label="Cambiar tema"
+            title="Cambiar entre modo claro y oscuro"></button>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- 1. Nuevo escaneo ─────────────────────────────────────── -->
+  <section class="card" aria-labelledby="scan-h">
+    <div class="card-h">
+      <span id="scan-h" class="h-title">Nuevo escaneo</span>
+      <span class="h-sub">Sherlock + Holehe, todo local</span>
+    </div>
+    <div class="scan-grid">
+      <div class="field">
+        <label class="field-label" for="users">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          Usernames
+        </label>
+        <textarea id="users" class="textarea" placeholder="je7remy, otro_user"></textarea>
+      </div>
+      <div class="field">
+        <label class="field-label" for="mails">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+          Correos
+        </label>
+        <textarea id="mails" class="textarea" placeholder="tu@correo.com"></textarea>
+      </div>
+    </div>
+    <div class="card-foot">
+      <button id="scan-btn" class="btn btn-accent">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        Escanear
+        <span class="kbd">Ctrl ↵</span>
+      </button>
+      <span id="scan-status" class="status"></span>
+    </div>
+  </section>
+
+  <!-- 2. Stats ─────────────────────────────────────────── -->
+  <div id="stats" class="stats"></div>
+
+  <!-- 3. Lista de cuentas ───────────────────────────── -->
+  <div class="section-h">
+    <div class="section-title">Cuentas detectadas</div>
+    <div class="section-tools">
+      <div class="filters" role="tablist" aria-label="Filtros de cuentas">
+        <button class="filter on" id="f-all"       data-f="all"       onclick="setFilter('all')"       role="tab">Todas</button>
+        <button class="filter"    id="f-triage"    data-f="triage"    onclick="setFilter('triage')"    role="tab">Triage</button>
+        <button class="filter"    id="f-exposure"  data-f="exposure"  onclick="setFilter('exposure')"  role="tab">Brechas</button>
+        <button class="filter"    id="f-pending"   data-f="pending"   onclick="setFilter('pending')"   role="tab">Pendientes</button>
+        <button class="filter"    id="f-your_turn" data-f="your_turn" onclick="setFilter('your_turn')" role="tab">Tu turno</button>
+        <button class="filter"    id="f-action"    data-f="action"    onclick="setFilter('action')"    role="tab">Acción</button>
+        <button class="filter"    id="f-done"      data-f="done"      onclick="setFilter('done')"      role="tab">Completadas</button>
+        <button class="filter"    id="f-kept"      data-f="kept"      onclick="setFilter('kept')"      role="tab">Conservadas</button>
+        <button class="filter"    id="f-discarded" data-f="discarded" onclick="setFilter('discarded')" role="tab">Descartadas</button>
+      </div>
+      <button id="process-all-btn" class="btn btn-sm btn-accent"
+              onclick="askProcessAllAuto()"
+              title="Encola todas las cuentas confirmadas como tuyas cuyo flujo es automatizable">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l3 3 5-5"/><path d="M11 12l3 3 7-7"/></svg>
+        <span id="process-all-label">Procesar automáticas</span>
+      </button>
+      <!-- visibilidad controlada por JS según filtro activo -->
+      <button id="bulk-low-btn" class="btn btn-sm btn-ghost"
+              onclick="discardLowConfidence()"
+              title="Descartar en lote todas las cuentas pendientes con confianza baja"
+              style="display:none">
+        Descartar low
+      </button>
+      <button id="clear-btn" class="btn btn-sm btn-danger"
+              onclick="askClear()"
+              title="Borrar todas las cuentas detectadas. El próximo escaneo empieza limpio."
+              aria-label="Limpiar todas las cuentas">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+        Limpiar
+      </button>
+    </div>
+  </div>
+  <div class="account-list" id="list" aria-live="polite"></div>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="modal" class="modal-bg" role="dialog" aria-modal="true" aria-labelledby="modal-title"></div>
+
+
+<!-- RASTRILLO_BOOT: el handler GET / sustituye este comentario por un
+     <script>window.__RASTRILLO_BOOT__={...}</script>. Es la ÚNICA pieza
+     dinámica del HTML; el resto es estático y se sirve por /static/. -->
+<!--RASTRILLO_BOOT-->
+<script src="/static/app.js"></script>
+</body></html>

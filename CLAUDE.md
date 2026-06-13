@@ -64,7 +64,10 @@ con la plantilla GDPR estática en uno de los 6 idiomas soportados.
 `cli.py` — entrypoint. Sin argumentos arranca el dashboard, abre el
 navegador con el token en la URL y queda corriendo. Subcomandos `list` y
 `run` son auxiliares de debug. Instalado como `rastrillo` y `rs` vía
-`pyproject.toml`.
+`pyproject.toml`. Los shims viven en `.venv/(bin|Scripts)/` y esa carpeta
+no está en el `PATH` global del usuario: para invocar el comando hay que
+usar los wrappers (`rastrillo.sh`/`rastrillo.ps1`/`rastrillo.cmd`),
+activar el venv, o instalar global con `pipx install .`.
 
 `rastrillo/config.py` — rutas bajo `~/.rastrillo`, `KEEP_PLATFORMS`,
 config de IA, generación del token de auth, flag dry-run mutable, helpers

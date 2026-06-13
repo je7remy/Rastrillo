@@ -1,0 +1,16 @@
+{
+  "platform": "pinterest",
+  "display_name": "Pinterest",
+  "aliases": ["pinterest.com", "pinterest.es"],
+  "difficulty": "easy",
+  "deletion_type": "full",
+  "url": "https://www.pinterest.com/settings/",
+  "login_check": "div[data-test-id='header-profile']",
+  "steps": [
+    {"action": "goto", "url": "https://www.pinterest.com/settings/"},
+    {"action": "ensure_login", "login_url": "https://www.pinterest.com/login/", "check": "div[data-test-id='header-profile']"},
+    {"action": "ai_assist", "goal": "navega a Account management y pulsa 'Delete account' / 'Close account'"},
+    {"action": "pause", "message": "Pinterest envia un email de confirmacion. Revisa tu correo y confirma; luego continua."},
+    {"action": "verify", "success_selector": "text=Log in", "on_success": "deleted"}
+  ]
+}

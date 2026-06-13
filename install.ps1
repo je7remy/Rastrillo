@@ -145,8 +145,17 @@ Ok "rastrillo --help OK"
 Write-Host ""
 Write-Host "Instalacion completa." -ForegroundColor Green
 Write-Host ""
-Write-Host "Para arrancar Rastrillo:" -ForegroundColor White
+Write-Host "Para arrancar Rastrillo (via corta):" -ForegroundColor White
 Write-Host "    .\rastrillo.ps1" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "(O doble-click en rastrillo.cmd desde el Explorador.)" -ForegroundColor Gray
+Write-Host ""
+Write-Host "El ejecutable real vive en .venv\Scripts\rastrillo.exe y esa" -ForegroundColor Yellow
+Write-Host "carpeta NO esta en tu PATH global. Por eso 'rastrillo' a secas" -ForegroundColor Yellow
+Write-Host "no se reconoce. Si quieres el comando global, una opcion limpia:" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "    pipx install ." -ForegroundColor Cyan
+Write-Host ""
+Write-Host "(Despues hay que descargar Chromium dentro del venv de pipx;" -ForegroundColor Gray
+Write-Host " ver README.md > Instalacion > pipx.)" -ForegroundColor Gray
 Write-Host ""
