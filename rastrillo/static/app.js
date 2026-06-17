@@ -742,6 +742,85 @@ $("dir-refresh").onclick=async()=>{
   finally{ b.disabled=false; load(); }
 };
 
+/* ── Domain Intelligence ──────────────────────────────────────
+ * Recon OSINT defensivo sobre un dominio (WHOIS + DNS + correlación).
+ * Separado del flujo de borrado: solo para infra propia o autorizada. */
+function domField(label, value){
+  if(value===null || value===undefined || value==="") return "";
+  return `<div class="kv"><b>${escapeHtml(label)}:</b>${escapeHtml(String(value))}</div>`;
+}
+function domList(label, arr){
+  if(!arr || !arr.length) return "";
+  const items = arr.map(x=>`<li>${escapeHtml(String(x))}</li>`).join("");
+  return `<div class="dom-block"><div class="dom-block-h">${escapeHtml(label)}</div><ul class="dom-ul">${items}</ul></div>`;
+}
+function renderDomainReport(rep){
+  if(!rep) return "";
+  const w = rep.whois||{}, d = rep.dns||{}, cor = rep.correlations||[];
+  /* WHOIS */
+  const whoisRows = [
+    domField("Registrador", w.registrar),
+    domField("Creado", w.created),
+    domField("Expira", w.expires),
+    domField("Actualizado", w.updated),
+    domField("Registrant", w.registrant),
+  ].join("");
+  const whoisErr = w.error ? `<div class="row-msg" style="color:var(--danger)">WHOIS: ${escapeHtml(w.error)}</div>` : "";
+  const whois = `<div class="dom-block"><div class="dom-block-h">WHOIS</div>${whoisRows||'<div class="hint">Sin campos extraídos.</div>'}${domList("Estados", w.status)}${domList("Nameservers", w.nameservers)}${whoisErr}</div>`;
+  /* DNS */
+  const dnsErr = d.error ? `<div class="row-msg" style="color:var(--danger)">DNS: ${escapeHtml(d.error)}</div>` : "";
+  const dns = `<div class="dom-block"><div class="dom-block-h">DNS${d.incomplete?' <span class="badge warn">parcial</span>':''}</div>`
+    + domList("A", d.a) + domList("MX", d.mx) + domList("NS", d.ns) + domList("TXT", d.txt)
+    + ((d.a&&d.a.length)||(d.mx&&d.mx.length)||(d.ns&&d.ns.length)||(d.txt&&d.txt.length)?"":'<div class="hint">Sin registros.</div>')
+    + dnsErr + `</div>`;
+  /* Correlaciones */
+  let corHtml;
+  if(cor.length){
+    corHtml = cor.map(c=>{
+      const tone = CONF_TONE[c.confidence]||"";
+      return `<div class="dom-cor">
+        <span class="badge ${tone}" title="Confianza ${escapeHtml(c.confidence||"")}">${escapeHtml(c.confidence||"?")}</span>
+        <span class="dom-cor-prov">${escapeHtml(c.proveedor||"")}</span>
+        <span class="dom-cor-tipo">${escapeHtml(c.tipo||"")}</span>
+        <span class="dom-cor-ev">${escapeHtml(c.evidencia||"")}</span>
+      </div>`;
+    }).join("");
+  } else {
+    corHtml = '<div class="hint">Sin correlaciones detectadas.</div>';
+  }
+  const cors = `<div class="dom-block"><div class="dom-block-h">Correlaciones <span class="hint">(candidatos heurísticos, no hechos confirmados)</span></div>${corHtml}</div>`;
+  /* Errores globales */
+  const errs = (rep.errors&&rep.errors.length)
+    ? `<div class="row-msg" style="color:var(--warn)">${rep.errors.map(e=>escapeHtml(e.source+": "+e.error)).join(" · ")}</div>`
+    : "";
+  return `<div class="dom-report">
+    <div class="dom-report-h">${escapeHtml(rep.domain||"")}</div>
+    ${whois}${dns}${cors}${errs}
+  </div>`;
+}
+async function analyzeDomain(){
+  const raw=($("dom-input").value||"").trim().toLowerCase();
+  if(!raw){ toast("Escribe un dominio", 3000, "err"); return; }
+  const btn=$("dom-btn"), st=$("dom-status");
+  btn.disabled=true;
+  st.innerHTML='<span class="chip-dot warn pulse" style="display:inline-block;margin-right:6px"></span>Analizando…';
+  st.classList.add("busy");
+  try{
+    const rep=await postJSON("/api/domain/analyze",{domain:raw});
+    $("dom-result").innerHTML=renderDomainReport(rep);
+    st.textContent="Análisis completado";
+  } catch(e){
+    st.textContent="";
+    toast(e.message||"No pude analizar el dominio", 7000, "err");
+  } finally {
+    btn.disabled=false; st.classList.remove("busy");
+  }
+}
+$("dom-btn").onclick=analyzeDomain;
+$("dom-input").addEventListener("keydown",(e)=>{
+  if(e.key==="Enter"){ e.preventDefault(); analyzeDomain(); }
+});
+
 /* ── Toggle de tema ───────────────────────────────────────── */
 function applyTheme(theme, save){
   document.documentElement.dataset.theme = theme;

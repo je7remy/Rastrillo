@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audit, config, db, jobs, directory, ai_assist, resolver
+from . import audit, config, db, jobs, directory, ai_assist, resolver, domain_intel
 from .recipes import get_recipe
 
 # Tarea 10: el frontend vive en rastrillo/static/ (HTML + CSS + JS).
@@ -162,6 +162,10 @@ class OwnBody(BaseModel):
 
 class DryRunBody(BaseModel):
     enabled: bool
+
+
+class DomainBody(BaseModel):
+    domain: str
 
 
 # --- API: lectura -----------------------------------------------------------
@@ -687,6 +691,55 @@ def api_directory_info():
     info = directory.directory_info()
     info["ai_enabled"] = ai_assist.available()
     return info
+
+
+# --- API: Domain Intelligence -----------------------------------------------
+# Recon OSINT defensivo sobre UN dominio (WHOIS + DNS + correlación). Cuelga
+# de /api/* → el auth_middleware ya exige token y valida Host. ALCANCE: solo
+# para dominios propios o que el usuario tiene permiso de auditar.
+@app.post("/api/domain/analyze")
+def api_domain_analyze(body: DomainBody):
+    """Analiza un dominio y persiste el informe. Síncrono pero acotado por los
+    timeouts de domain_intel (RASTRILLO_WHOIS_TIMEOUT / RASTRILLO_DNS_TIMEOUT):
+    en el peor caso, unos pocos saltos WHOIS + 4 consultas DNS."""
+    domain = (body.domain or "").strip().lower()
+    if not domain_intel.valid_domain(domain):
+        raise HTTPException(400, "Dominio inválido. Ejemplo válido: ejemplo.com")
+    db.init()
+    try:
+        report = domain_intel.analyze(domain)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"análisis de dominio falló: {e}")
+    db.save_domain_report(report["domain"], json.dumps(report, ensure_ascii=False))
+    return report
+
+
+@app.get("/api/domain/report")
+def api_domain_report(domain: str):
+    """Devuelve el último informe guardado de `domain`, o {report: null}."""
+    domain = (domain or "").strip().lower()
+    if not domain_intel.valid_domain(domain):
+        raise HTTPException(400, "Dominio inválido.")
+    db.init()
+    row = db.get_domain_report(domain)
+    if not row or not row["report"]:
+        return {"report": None}
+    try:
+        return {"report": json.loads(row["report"]),
+                "created_at": row["created_at"]}
+    except Exception:
+        return {"report": None}
+
+
+@app.get("/api/domain/history")
+def api_domain_history():
+    """Lista breve de dominios analizados (recientes primero)."""
+    db.init()
+    rows = db.list_domain_reports()
+    return {"domains": [{"domain": r["domain"], "created_at": r["created_at"]}
+                        for r in rows]}
 
 
 @app.post("/api/directory/refresh")

@@ -20,6 +20,9 @@ dependencies = [
     # anthropic es opcional: solo se usa para el modo IA de respaldo.
     "anthropic>=0.30",
     "reportlab>=4.0",
+    # dnspython: única dep del módulo Domain Intelligence. La stdlib no
+    # resuelve MX/NS/TXT; ver justificación en rastrillo/domain_intel.py.
+    "dnspython>=2.6",
 ]
 
 [project.scripts]

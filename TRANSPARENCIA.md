@@ -61,7 +61,10 @@ Cada afirmación es comprobable leyendo el archivo citado.
 - **Nunca habla con tu red interna.**
   El SSRF guard del resolver (`resolver.py:171-216`) sólo permite
   `https://` con IPs públicas; rechaza loopback, RFC1918, link-local,
-  reservadas y multicast antes de cada GET.
+  reservadas y multicast antes de cada GET. El módulo Domain Intelligence
+  aplica el mismo criterio antes de abrir el socket WHOIS:43
+  (`domain_intel.py:109-137`), por si una referencia de servidor estuviera
+  envenenada.
 
 - **Nunca acepta peticiones de otro origen.**
   Allowlist de hosts (anti DNS rebinding) en `server.py:107-116` y
@@ -92,6 +95,15 @@ archivo y línea para que lo confirmes tú.
 | 6 | Sitios donde decides borrar (Chromium persistente) | Cada cuenta que procesas | Tráfico de tu propio Chromium con tus cookies del perfil persistente. Rastrillo abre la URL pero **no** extrae cookies ni storage state | No | `engine.py:204-208` |
 | 7 | Backend local (`/api/*`) | UI | Sólo URLs relativas. Cero `fetch` a dominios externos, cero CDN, cero tracker | – | `static/app.js:90,113` |
 | 8 | Subprocesos: Sherlock, Holehe, opcionalmente Maigret | Durante `discover()` | Cada binario hace sus propios GETs a las plataformas que conoce. **Rastrillo no controla ni inspecciona ese tráfico** | Maigret opt-in (auto-detecta en `PATH`); Sherlock/Holehe siempre | `discovery.py:171-182, 239-242, 341-348` |
+| 9 | Servidores WHOIS (TCP **puerto 43**): `whois.iana.org` y, siguiendo sus referencias, el WHOIS del registro/registrar del TLD | Solo cuando **tú** lanzas un análisis desde la sección "Inteligencia de dominio" (`POST /api/domain/analyze`) | El dominio consultado en texto plano (`<dominio>\r\n`). Cero datos del usuario, cero credenciales. Antes de conectar, el guard `_host_resolves_public` verifica que el servidor resuelve a IPs públicas (mismo criterio que el SSRF guard del resolver) | No (lo disparas tú por dominio) | `domain_intel.py:109-137` (guard), `:139-162` (socket 43), `:277-339` (recursión) |
+| 10 | Resolutor DNS del sistema (UDP/TCP **53**, vía `dnspython`) | Mismo disparo que la fila 9 | Consultas A/MX/NS/TXT del dominio al resolutor que tengas configurado (local/ISP). `dnspython` usa la config DNS del SO; no hardcodeamos ningún resolutor de terceros | No (lo disparas tú por dominio) | `domain_intel.py:341-358` (`_dns_query`), `:360-440` (`lookup_dns`) |
+
+**La correlación NO hace HTTP ni red extra.** `correlate()`
+(`domain_intel.py:488-530`) solo interpreta los registros DNS/WHOIS ya
+obtenidos en las filas 9-10 para inferir proveedores (MX→correo, NS→DNS,
+SPF/verificaciones TXT→SaaS). No abre ninguna conexión nueva, por lo que no
+necesita el guard anti-SSRF. Las inferencias son heurísticas y van
+etiquetadas con su confianza, nunca presentadas como hechos confirmados.
 
 Eso es todo. Si tu firewall ve algo distinto saliendo del proceso de
 Rastrillo o del Chromium que lanza, dímelo: es un bug.
@@ -223,7 +235,7 @@ contratar Anthropic ni HIBP.
   `pip-audit --strict -r requirements.lock` en cada push y PR a `main`.
   Si aparece una CVE en una dependencia fijada, el CI rompe y se
   bloquea el merge hasta regenerar el lock.
-- **Tests con `unittest` de stdlib** — 165 tests, sin dependencias de
+- **Tests con `unittest` de stdlib** — 189 tests, sin dependencias de
   testing nuevas (`tests/`). Cada test corre con su propio
   `RASTRILLO_HOME` en tempdir. Algunos cubren explícitamente los
   invariantes de seguridad (`tests/test_onboarding_and_auth.py`,

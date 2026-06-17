@@ -47,6 +47,8 @@ colorama==0.4.6
     #   uvicorn
 distro==1.9.0
     # via anthropic
+dnspython==2.8.0
+    # via rastrillo (pyproject.toml)
 docstring-parser==0.18.0
     # via anthropic
 et-xmlfile==2.0.0

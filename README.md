@@ -62,6 +62,7 @@
 - 💾 **Resumible** — `current_step` y hash de receta persistidos, audit log append-only, backup de DB antes de borrados masivos.
 - 🧪 **Modo simulación** — flujo completo sin disparar la acción destructiva final.
 - 📤 **Informe exportable** — JSON, CSV o PDF.
+- 🌐 **Inteligencia de dominio** — WHOIS + DNS (A/MX/NS/TXT) + correlación heurística de proveedores, para tu propia infraestructura o la que tienes permiso de auditar.
 
 ---
 
@@ -103,6 +104,10 @@ listo).
 - **Conexión a internet** — para descubrir cuentas y borrar
 - *(Opcional)* **Clave de Anthropic** — activa el agente IA y la búsqueda web
 - *(Opcional)* **Clave de HaveIBeenPwned** — activa el cruce con brechas
+
+> ℹ️ La **Inteligencia de dominio** no necesita binarios externos: WHOIS va por
+> socket TCP/43 (stdlib) y DNS por `dnspython` (dependencia instalada por el
+> instalador). No requiere `whois` ni `dig` en el PATH.
 
 ---
 
@@ -295,6 +300,21 @@ $env:RASTRILLO_DRY_RUN = "1"; .\rastrillo.ps1
 
 Ejecuta el flujo completo sin disparar la acción destructiva final.
 
+### Inteligencia de dominio
+
+En el dashboard, la sección **Inteligencia de dominio** toma un dominio y
+reúne información pública: WHOIS (registrador, fechas de creación/expiración,
+nameservers, estados), DNS (A/MX/NS/TXT) y una correlación heurística de
+proveedores y servicios (p. ej. MX → proveedor de correo, NS → DNS/hosting,
+SPF/verificaciones TXT → SaaS). Cada inferencia se muestra con su nivel de
+confianza: son **candidatos, no hechos confirmados**.
+
+> 🔒 **Alcance**: esto es recon OSINT **defensivo**. WHOIS y DNS son datos
+> públicos, y la función es para **tu propia infraestructura o la que tienes
+> permiso de auditar** (el "rastrillo corporativo"), no para perfilar a
+> terceros. No necesita `whois`/`dig` en el PATH: WHOIS va por TCP/43 (stdlib)
+> y DNS por `dnspython`.
+
 ---
 
 ## 🎯 Cómo decide qué hacer con cada cuenta
@@ -340,6 +360,7 @@ rastrillo/
 │   ├── engine.py           # Motor Playwright
 │   ├── ai_assist.py        # Capa IA opcional (Anthropic)
 │   ├── hibp.py             # Cliente HaveIBeenPwned
+│   ├── domain_intel.py     # Domain Intelligence (WHOIS + DNS + correlación)
 │   ├── hostutil.py         # Normalización de host / slug
 │   ├── jobs.py             # Coordinación server↔engine
 │   ├── server.py           # API FastAPI
@@ -349,7 +370,7 @@ rastrillo/
 │   ├── recipes/            # Recetas de ejemplo
 │   └── static/             # Frontend (index.html + css + js)
 │
-├── tests/                  # 165 tests con unittest stdlib
+├── tests/                  # 189 tests con unittest stdlib
 ├── packaging/aur/PKGBUILD  # Empaquetado Arch
 └── .github/workflows/ci.yml
 ```
@@ -442,7 +463,7 @@ IA recibe estructura de página (árbol de accesibilidad + texto visible),
 .venv/bin/python -m unittest discover -t . -s tests -v
 ```
 
-Suite con `unittest` de stdlib, sin dependencias nuevas. **165 tests**
+Suite con `unittest` de stdlib, sin dependencias nuevas. **189 tests**
 (~1 minuto en Windows, ~30 s en Linux). Cada test corre con su propio
 `RASTRILLO_HOME` en tempdir.
 

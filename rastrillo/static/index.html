@@ -130,6 +130,33 @@
     </div>
   </div>
   <div class="account-list" id="list" aria-live="polite"></div>
+
+  <!-- 4. Domain Intelligence ─────────────────────────────────
+       Recon OSINT defensivo sobre UN dominio. Separado del flujo de borrado
+       de cuentas: WHOIS + DNS son datos públicos y esto es para tu propia
+       infraestructura o la que tienes permiso de auditar, no para terceros. -->
+  <section class="card" aria-labelledby="dom-h">
+    <div class="card-h">
+      <span id="dom-h" class="h-title">Inteligencia de dominio</span>
+      <span class="h-sub">WHOIS + DNS · solo para infra propia o autorizada</span>
+    </div>
+    <div class="field">
+      <label class="field-label" for="dom-input">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
+        Dominio
+      </label>
+      <input id="dom-input" class="input" type="text" autocomplete="off"
+             placeholder="ejemplo.com">
+    </div>
+    <div class="card-foot">
+      <button id="dom-btn" class="btn btn-accent">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        Analizar
+      </button>
+      <span id="dom-status" class="status"></span>
+    </div>
+    <div id="dom-result" class="dom-result" aria-live="polite"></div>
+  </section>
 </main>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>

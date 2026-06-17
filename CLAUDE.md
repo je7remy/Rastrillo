@@ -191,6 +191,24 @@ cuando supera `RASTRILLO_AUDIT_MAX_BYTES` (default 5 MB).
 `rastrillo/report_pdf.py` — generación del informe PDF (reportlab). Lo
 usa el endpoint `GET /api/report?format=pdf`.
 
+`rastrillo/domain_intel.py` — **Domain Intelligence** (recon OSINT
+defensivo sobre UN dominio; AMPLÍA el alcance de "solo tus cuentas" — es
+para infra propia o autorizada). `lookup_whois` (recursivo IANA →
+registro → registrar por socket TCP/43, sin deps), `lookup_dns`
+(A/MX/NS/TXT con `dnspython`, import perezoso), `correlate` (heurística
+data-driven MX→correo / NS→DNS / SPF+verificaciones TXT→SaaS, SIN red,
+cada inferencia con confianza+evidencia) y `analyze` (orquesta y siempre
+devuelve informe; solo lanza en dominio inválido). Estilo `discovery.py`:
+errores visibles, un fallo no aborta el resto. Las dos primitivas de red
+(`_whois_query`, `_dns_query`) son mockeables. El socket WHOIS pasa por
+`_host_resolves_public` (mismo criterio anti-SSRF que `resolver`). La
+correlación NO hace HTTP extra. Persistencia en la tabla `domain_reports`
+(`db.save_domain_report`/`get_domain_report`/`list_domain_reports`).
+Endpoints `POST /api/domain/analyze`, `GET /api/domain/report?domain=`,
+`GET /api/domain/history`. Vista en el dashboard (sección
+"Inteligencia de dominio"). Decisión de dependencias justificada en la
+cabecera del módulo.
+
 ## Convenciones
 
 Código y comentarios en español. Sin dependencias nuevas salvo que sean
@@ -248,8 +266,14 @@ Archivos:
 - `tests/test_anti_false_deleted.py` — `revisit_profile` + detección
   de redirect a login; `_confirm_and_seal` no sella `deleted` en
   falsos positivos.
+- `tests/test_domain_intel.py` — Domain Intelligence offline: parseo
+  WHOIS recursivo y DNS desde fixtures (primitivas de red mockeadas),
+  reglas de correlación (MX→Google, NS→Cloudflare, SPF, verificaciones
+  TXT), degradación visible (timeout WHOIS, NXDOMAIN, timeout por tipo),
+  guard anti-SSRF del socket WHOIS, y los endpoints (401 sin token, 400
+  dominio inválido, happy-path con persistencia).
 
-Alrededor de 130 tests en unos 28 segundos. Antes de cualquier cambio
+Alrededor de 189 tests en menos de un minuto. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -277,6 +301,8 @@ Eso es lo que hace `test_engine_html_local.py`.
 | `RASTRILLO_SHERLOCK_SITE_TIMEOUT` | 60 | Timeout per-site de Sherlock |
 | `RASTRILLO_HOLEHE_TIMEOUT` | 600 | Timeout global de Holehe |
 | `RASTRILLO_MAIGRET_TIMEOUT` | 300 | Timeout global de Maigret |
+| `RASTRILLO_WHOIS_TIMEOUT` | 10 | Segundos por consulta WHOIS (Domain Intelligence) |
+| `RASTRILLO_DNS_TIMEOUT` | 5 | Segundos por tipo de registro DNS (Domain Intelligence) |
 | `RASTRILLO_AUDIT_MAX_BYTES` | 5242880 | Tamaño que dispara rotación |
 
 ## Estado actual

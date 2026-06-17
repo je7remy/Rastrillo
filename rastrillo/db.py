@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS events (
     level TEXT,
     message TEXT
 );
+-- Domain Intelligence: informe WHOIS+DNS+correlación por dominio. Guardamos
+-- un solo informe por dominio (el último); `save_domain_report` borra el
+-- previo antes de insertar. `report` es el JSON de domain_intel.analyze().
+CREATE TABLE IF NOT EXISTS domain_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL,
+    report TEXT,                -- JSON del analyze()
+    created_at REAL
+);
 """
 
 SCHEMA_INDEXES = """
@@ -82,6 +91,8 @@ CREATE INDEX IF NOT EXISTS idx_accounts_lookup
     ON accounts(source_site, identifier);
 CREATE INDEX IF NOT EXISTS idx_accounts_platform
     ON accounts(platform, identifier);
+CREATE INDEX IF NOT EXISTS idx_domain_reports_domain
+    ON domain_reports(domain);
 """
 
 # Migración para DB anteriores que tenían UNIQUE(platform, identifier): se
@@ -326,3 +337,37 @@ def clear_accounts():
         con.execute(
             "DELETE FROM sqlite_sequence WHERE name IN ('accounts','events')"
         )
+
+
+# --- Domain Intelligence ----------------------------------------------------
+def save_domain_report(domain: str, report_json: str) -> int:
+    """Guarda (o reemplaza) el informe de un dominio. Un informe por dominio:
+    borramos el previo antes de insertar para no acumular histórico."""
+    domain = (domain or "").strip().lower()
+    with connect() as con:
+        con.execute("DELETE FROM domain_reports WHERE domain=?", (domain,))
+        cur = con.execute(
+            "INSERT INTO domain_reports (domain, report, created_at) VALUES (?,?,?)",
+            (domain, report_json, time.time()),
+        )
+        return cur.lastrowid
+
+
+def get_domain_report(domain: str):
+    """Devuelve la fila del informe más reciente de `domain`, o None."""
+    domain = (domain or "").strip().lower()
+    with connect() as con:
+        return con.execute(
+            "SELECT * FROM domain_reports WHERE domain=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (domain,),
+        ).fetchone()
+
+
+def list_domain_reports():
+    """Lista (domain, created_at) de todos los informes guardados, recientes
+    primero. La UI lo usa para ofrecer un histórico breve."""
+    with connect() as con:
+        return con.execute(
+            "SELECT domain, created_at FROM domain_reports ORDER BY created_at DESC"
+        ).fetchall()

@@ -33,7 +33,7 @@ Antes de cualquier cambio, corre la suite completa:
 .venv/bin/python -m unittest discover -t . -s tests -v
 ```
 
-Son **165 tests**, ~1 minuto en Windows, ~30 s en Linux. Cada test corre
+Son **189 tests**, ~1 minuto en Windows, ~30 s en Linux. Cada test corre
 con su propio `RASTRILLO_HOME` en tempdir, sin depender de claves de API
 ni red real.
 
@@ -44,7 +44,13 @@ HTTP local + FakePage).
 ## Reglas del proyecto
 
 1. **Código y comentarios en español.** Consistencia con todo el repo.
-2. **Sin dependencias nuevas** salvo justificación clara en el PR.
+2. **Sin dependencias nuevas** salvo justificación clara en el PR. Si
+   añades una, va a `pyproject.toml`, `requirements.txt` **y** se regenera
+   `requirements.lock` con `pip-compile`. Dependencias justificadas hasta
+   hoy: **`dnspython`** (módulo Domain Intelligence) — la stdlib no resuelve
+   MX/NS/TXT y envolver `dig`/`nslookup` como subprocesos es frágil y está
+   roto-por-defecto en Windows; WHOIS sí va por socket TCP/43 de la stdlib,
+   sin dep. Detalle completo en la cabecera de `rastrillo/domain_intel.py`.
 3. **Nada específico de plataforma en `engine.py`.** Lo específico vive
    en recetas (`rastrillo/recipes/*.json`) o en el directorio JustDeleteMe.
 4. **Invariantes que NO se rompen** (ver `CLAUDE.md` para el detalle):

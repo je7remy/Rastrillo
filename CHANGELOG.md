@@ -8,7 +8,33 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-—
+### Added
+
+- **Domain Intelligence** (`rastrillo/domain_intel.py`): recon OSINT
+  defensivo sobre un dominio. WHOIS (registrador, fechas de
+  creación/expiración/actualización, estados, nameservers, registrant),
+  DNS (A/MX/NS/TXT) y correlación heurística de proveedores/servicios
+  (MX→correo, NS→DNS/hosting, SPF/verificaciones TXT→SaaS), cada
+  inferencia etiquetada con confianza y evidencia. Endpoints
+  `POST /api/domain/analyze` y `GET /api/domain/report`, tabla
+  `domain_reports` en SQLite y una vista resumida en el dashboard.
+  Pensado **solo para infra propia o que tienes permiso de auditar**.
+- Guard anti-SSRF para el socket WHOIS:43 (`_host_resolves_public`),
+  con el mismo criterio que el del resolver: solo IPs públicas.
+
+### Dependencies
+
+- Añadida **`dnspython>=2.6`** (única dep nueva), necesaria porque la
+  stdlib no resuelve MX/NS/TXT. WHOIS se hace por socket TCP/43 con la
+  stdlib (cero deps). Decisión y alternativas descartadas documentadas en
+  la cabecera de `rastrillo/domain_intel.py` y en `CONTRIBUTING.md`.
+  Reflejada en `pyproject.toml`, `requirements.txt` y `requirements.lock`
+  (regenerado con `pip-compile`).
+
+### Variables de entorno
+
+- `RASTRILLO_WHOIS_TIMEOUT` (default 10 s) y `RASTRILLO_DNS_TIMEOUT`
+  (default 5 s): timeouts por consulta del módulo Domain Intelligence.
 
 ## [0.1.0]
 
