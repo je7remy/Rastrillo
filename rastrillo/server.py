@@ -969,7 +969,10 @@ def index():
                         f'/static/app.js?v={_asset_version("app.js")}"')
     html = html.replace('/static/styles.css"',
                         f'/static/styles.css?v={_asset_version("styles.css")}"')
-    return html
+    # Sin esto el navegador podría servir un index.html cacheado viejo, que
+    # seguiría apuntando a un ?v= antiguo y anularía el cache-busting de los
+    # assets. no-cache obliga a revalidar el HTML con el server en cada carga.
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 # --- Arranque desde "python -m rastrillo.server" ----------------------------

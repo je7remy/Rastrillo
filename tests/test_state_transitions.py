@@ -66,6 +66,14 @@ class TestStateTransitions(IsolatedTestCase):
         data = (server._STATIC_DIR / "app.js").read_bytes()
         self.assertEqual(av, hashlib.sha256(data).hexdigest()[:10])
 
+    def test_get_root_no_cache_header(self):
+        """GET / trae Cache-Control: no-cache. Sin esto el navegador podría
+        servir un index.html viejo que apunta a un ?v= antiguo, anulando el
+        cache-busting de los assets."""
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("no-cache", r.headers.get("cache-control", "").lower())
+
     def test_host_no_permitido_es_403(self):
         """Anti DNS-rebinding: aunque venga el token, un Host fuera de la
         allowlist se rechaza antes."""
