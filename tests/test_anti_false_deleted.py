@@ -13,6 +13,7 @@
       * sin profile_url, solo URL cambiada (sin keyword) → manual
       * status_proposed=anonymized → se respeta tal cual (no aplica verificación)
 """
+import contextlib
 import urllib.error
 from unittest.mock import patch, MagicMock
 from .helpers import IsolatedTestCase
@@ -33,6 +34,7 @@ class TestRevisitProfile(IsolatedTestCase):
         from rastrillo import engine
         self.engine = engine
 
+    @contextlib.contextmanager
     def _patch_urlopen(self, *, status=200, body="", final_url=None,
                        http_error_code=None, raise_=None):
         def _open(req, timeout=None):
@@ -48,12 +50,31 @@ class TestRevisitProfile(IsolatedTestCase):
             mock.__enter__ = lambda s: mock
             mock.__exit__ = lambda *a: None
             return mock
-        return patch.object(
-            self.engine.urllib.request, "urlopen", side_effect=_open)
+        # Estos tests usan hosts ficticios (`https://x/...`) que no resuelven;
+        # el guard anti-SSRF (resolver._is_safe_url) los rechazaría antes del
+        # GET. Aquí queremos ejercitar la lógica de revisit_profile sobre la
+        # respuesta HTTP, así que neutralizamos el guard. El guard tiene su
+        # propio test: test_url_no_segura_es_none.
+        with patch.object(self.engine.resolver, "_is_safe_url",
+                          return_value=True), \
+             patch.object(self.engine.urllib.request, "urlopen",
+                          side_effect=_open):
+            yield
 
     def test_sin_url_es_none(self):
         self.assertIsNone(self.engine.revisit_profile(""))
         self.assertIsNone(self.engine.revisit_profile(None))
+
+    def test_url_no_segura_es_none(self):
+        # H1: si el guard anti-SSRF rechaza la URL, revisit_profile es
+        # conservador (None) y ni siquiera abre el socket.
+        with patch.object(self.engine.resolver, "_is_safe_url",
+                          return_value=False) as guard, \
+             patch.object(self.engine.urllib.request, "urlopen") as urlopen:
+            self.assertIsNone(
+                self.engine.revisit_profile("http://127.0.0.1:8765/u/alice"))
+            guard.assert_called_once()
+            urlopen.assert_not_called()
 
     def test_404_es_true(self):
         with self._patch_urlopen(http_error_code=404):

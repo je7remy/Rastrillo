@@ -78,6 +78,14 @@ def revisit_profile(profile_url: str, timeout: float = 8.0):
     """
     if not profile_url:
         return None
+    # Mismo guard anti-SSRF que usa el resolver para sus GET (Tarea 6): solo
+    # https:// y hosts que resuelven a IPs públicas. Sin esto, un profile_url
+    # apuntando a la red interna (o al propio dashboard) haría que el motor lo
+    # visite. Si no pasa, somos conservadores y NO concluimos (return None).
+    if not resolver._is_safe_url(profile_url):
+        _log.info("revisit_profile(%s): URL no segura (guard SSRF); no concluyo",
+                  profile_url)
+        return None
     try:
         req = urllib.request.Request(
             profile_url,

@@ -75,9 +75,10 @@ de onboarding (`is_onboarded`, `mark_onboarded`).
 
 `rastrillo/db.py` — SQLite. Estados completos:
 `found, queued, in_progress, awaiting_user, deleted, anonymized,
-user_done, semi_auto, email_draft, manual, skipped, failed, not_mine,
-dry_run`. Migraciones idempotentes (`recipe_hash`, `source_site`,
-`action_meta`, `confidence`, `owned`, `sent_at`) en `init()`. La
+user_done, semi_auto, email_draft, pending_deletion, manual, skipped,
+failed, not_mine, dry_run`. Migraciones idempotentes (`recipe_hash`,
+`source_site`, `action_meta`, `confidence`, `owned`, `sent_at`,
+`deletion_eta`, `deletion_started_at`) en `init()`. La
 unicidad de cuentas se hace en código por `(source_site, identifier)` —
 NO con UNIQUE en SQL — para no colapsar Reddit y RedditGifts.
 `snapshot_db()` copia la DB a `~/.rastrillo/backups/` antes de
@@ -164,6 +165,10 @@ relevantes: `GET /` (HTML), `GET /api/accounts`,
 `POST /api/accounts/{id}/action` (delete/anonymize/keep/retry/continue),
 `POST /api/accounts/{id}/own` (triage),
 `POST /api/accounts/{id}/mark-sent`,
+`POST /api/accounts/{id}/schedule-deletion` (fija plazo: `{days}` o `{eta}`),
+`POST /api/accounts/{id}/verify-deletion` (Verificar al vencer; reusa
+`engine.revisit_profile`),
+`POST /api/accounts/{id}/cancel-deletion` (limpia plazo → `manual`),
 `POST /api/accounts/{id}/confirm-account` (promueve HIBP a candidato),
 `POST /api/accounts/process-all-auto`,
 `POST /api/accounts/discard-low`,
@@ -244,7 +249,9 @@ Archivos:
   follow-up renderizan con marcadores específicos por idioma; detección
   por TLD.
 - `tests/test_state_transitions.py` — preflight de propiedad, mark-sent,
-  triage, dry-run, process-all-auto, middleware del token.
+  triage, dry-run, process-all-auto, middleware del token, y la
+  eliminación programada (schedule/verify/cancel, helper puro
+  `deletion_progress`, migración idempotente de `deletion_*`).
 - `tests/test_degradation_no_ai.py` — sin API key ninguna cuenta queda
   sin acción.
 - `tests/test_engine_html_local.py` — servidor HTTP local + FakePage

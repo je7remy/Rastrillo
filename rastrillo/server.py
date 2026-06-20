@@ -24,7 +24,9 @@ GET son libres (lectura). El token vive en config.AUTH_TOKEN (env-override).
 """
 import json
 import logging
+import math
 import os
+import time
 from typing import List, Optional
 
 from pathlib import Path
@@ -56,6 +58,7 @@ STATUS_META = {
     "user_done":     ("Tramitada",        "#0F6E56"),
     "semi_auto":     ("Acción: 1 clic",   "#0F6E56"),
     "email_draft":   ("Solicitud correo", "#534AB7"),
+    "pending_deletion": ("Plazo de eliminación", "#BA7517"),
     "manual":        ("Revisar",          "#854F0B"),
     "skipped":       ("Conservada",       "#5F5E5A"),
     "failed":        ("Error",            "#A32D2D"),
@@ -168,10 +171,53 @@ class DomainBody(BaseModel):
     domain: str
 
 
+class ScheduleBody(BaseModel):
+    # Exactamente uno de los dos: días restantes (lo computa el server) o un
+    # timestamp UNIX `eta` ya resuelto en el cliente (fin de día en hora local).
+    days: Optional[int] = None
+    eta: Optional[float] = None
+    confirm_owned: bool = False
+
+
 # --- API: lectura -----------------------------------------------------------
+# --- Cuenta regresiva de eliminación (FASE 4) -------------------------------
+# Máximo plazo aceptado al programar: ~10 años. Cota dura contra fechas absurdas.
+_MAX_DELETION_DAYS = 3650
+
+
+def deletion_progress(started_at, eta, now=None) -> Optional[dict]:
+    """Helper PURO para la cuenta regresiva. Único sitio donde se calcula el
+    progreso de un plazo de eliminación: el cliente solo renderiza lo que
+    devolvemos. Sin red, sin estado.
+
+    Devuelve {days_left, overdue, pct} o None si no hay `eta`.
+      - days_left: días enteros que faltan, con techo (ceil). 0 si ya venció.
+      - overdue: True si `now >= eta`.
+      - pct: 0..100 de progreso entre `started_at` y `eta`.
+    """
+    if not eta:
+        return None
+    now = time.time() if now is None else now
+    overdue = now >= eta
+    days_left = 0 if overdue else int(math.ceil((eta - now) / 86400.0))
+    if started_at and eta > started_at:
+        pct = (now - started_at) / (eta - started_at) * 100.0
+    else:
+        pct = 100.0 if overdue else 0.0
+    pct = max(0.0, min(100.0, pct))
+    return {"days_left": days_left, "overdue": bool(overdue), "pct": round(pct, 1)}
+
+
 @app.get("/api/accounts")
 def api_accounts():
-    rows = [dict(r) for r in db.list_accounts()]
+    rows = []
+    for r in db.list_accounts():
+        d = dict(r)
+        # Campo computado para la UI (cuenta regresiva). Solo presente si la
+        # cuenta tiene un plazo fijado; si no, queda None.
+        d["deletion"] = deletion_progress(d.get("deletion_started_at"),
+                                          d.get("deletion_eta"))
+        rows.append(d)
     return JSONResponse({
         "accounts": rows,
         "stats": db.stats(),
@@ -602,16 +648,133 @@ def api_mark_sent(account_id: int, body: ActionBody = ActionBody(action="mark-se
                       f"[simulación] habría marcado como enviada a {email_to or '?'}")
         return {"ok": True, "status": "dry_run", "dry_run": True}
 
-    # Si la cuenta venía de email_draft, registramos cuándo se envió (para el
-    # seguimiento GDPR: el plazo legal en la UE es 30 días).
+    # Registramos `sent_at` (cuándo se envió) SOLO cuando hay un borrador de
+    # correo real detrás: o la cuenta venía de `email_draft`, o su Resolution
+    # cacheada (`action_meta`) lleva un `email_to`. Es lo que alimenta el
+    # seguimiento GDPR (plazo legal de 30 días en la UE). Para completados
+    # semi_auto/manual sin correo NO marcamos sent_at: no es un envío GDPR y
+    # mostrar "Vencida" / "Seguimiento" no tendría sentido (no hay a quién
+    # reclamar). FASE 4 usará un campo propio (deletion_eta), no este.
     sent_at = None
-    if acc["status"] == "email_draft":
+    has_email_draft = acc["status"] == "email_draft"
+    if not has_email_draft and acc["action_meta"]:
+        try:
+            has_email_draft = bool((json.loads(acc["action_meta"]) or {}).get("email_to"))
+        except Exception:
+            has_email_draft = False
+    if has_email_draft:
         import time as _t
         sent_at = _t.time()
         db.update_account(account_id, sent_at=sent_at)
     audit.record("mark_sent", acc, extra={"sent_at": sent_at})
     db.set_status(account_id, "user_done", "Marcada como tramitada por el usuario.")
     return {"ok": True, "status": "user_done", "sent_at": sent_at}
+
+
+# --- Eliminación programada con cuenta regresiva (FASE 4) --------------------
+@app.post("/api/accounts/{account_id}/schedule-deletion")
+def api_schedule_deletion(account_id: int, body: ScheduleBody):
+    """Fija el plazo de eliminación de una cuenta (la plataforma dijo "en N
+    días" o "el día X"). El cliente manda `days` (lo computa el server) O un
+    `eta` ya resuelto (timestamp UNIX, fin de día en hora local del usuario).
+
+    Exige propiedad como las acciones destructivas (412 + confirm_owned). NO
+    se gatea por dry-run: fijar un plazo no borra nada, es metadato reversible.
+    """
+    acc = db.get_account(account_id)
+    if not acc:
+        raise HTTPException(404, "Cuenta no encontrada.")
+
+    # Validación de input ANTES del preflight (para no marcar owned si el
+    # input es inválido). Exactamente uno de days/eta.
+    has_days = body.days is not None
+    has_eta = body.eta is not None
+    if has_days == has_eta:
+        raise HTTPException(400, "Indica días restantes O una fecha, no ambos ni ninguno.")
+    now = time.time()
+    if has_days:
+        if body.days < 1 or body.days > _MAX_DELETION_DAYS:
+            raise HTTPException(400, f"Los días deben estar entre 1 y {_MAX_DELETION_DAYS}.")
+        eta = now + body.days * 86400.0
+    else:
+        eta = float(body.eta)
+        if eta <= now:
+            raise HTTPException(400, "La fecha debe ser futura.")
+        if eta > now + _MAX_DELETION_DAYS * 86400.0:
+            raise HTTPException(400, "La fecha está demasiado lejos (máx ~10 años).")
+
+    # Preflight de propiedad (idéntico al resto de acciones).
+    if not acc["owned"] and not body.confirm_owned:
+        raise HTTPException(
+            status_code=412,
+            detail={
+                "code": "needs_ownership_confirmation",
+                "message": ("Confirma que esta cuenta es tuya antes de "
+                            "programar su eliminación."),
+                "account": _account_summary(acc),
+            },
+        )
+    if not acc["owned"] and body.confirm_owned:
+        db.update_account(account_id, owned=1)
+        audit.record("own", acc, extra={"via": "schedule_deletion_confirm"})
+        acc = db.get_account(account_id)
+
+    db.update_account(account_id, deletion_started_at=now, deletion_eta=eta)
+    audit.record("schedule_deletion", acc, extra={"eta": eta, "via": "schedule_endpoint"})
+    db.set_status(account_id, "pending_deletion",
+                  "Eliminación programada por el usuario.")
+    return {"ok": True, "status": "pending_deletion",
+            "deletion_eta": eta, "deletion_started_at": now}
+
+
+@app.post("/api/accounts/{account_id}/verify-deletion")
+def api_verify_deletion(account_id: int):
+    """Botón "Verificar" del estado vencido: comprueba por HTTP ligero si la
+    cuenta ya no existe, reusando `engine.revisit_profile` (con guard anti-SSRF).
+
+    - True  → la cuenta ya no existe: sella `deleted`.
+    - False → sigue cargando: pasa a `manual` (revísala).
+    - None  → inconcluso (timeout/sin profile_url): se queda en pending_deletion.
+
+    En dry-run hace la lectura pero NO muta estado (patrón de mark-sent)."""
+    acc = db.get_account(account_id)
+    if not acc:
+        raise HTTPException(404, "Cuenta no encontrada.")
+    from .engine import revisit_profile
+    result = revisit_profile(acc["profile_url"])
+
+    if config.DRY_RUN:
+        audit.record("verify_deletion", acc, dry_run=True, extra={"result": result})
+        return {"ok": True, "status": acc["status"], "result": result, "dry_run": True}
+
+    if result is True:
+        audit.record("verify_deletion", acc, extra={"result": "deleted"})
+        db.set_status(account_id, "deleted",
+                      "Verificada: la cuenta ya no existe (revisita HTTP).")
+        return {"ok": True, "status": "deleted", "result": True}
+    if result is False:
+        audit.record("verify_deletion", acc, extra={"result": "still_active"})
+        db.set_status(account_id, "manual",
+                      "La cuenta sigue activa tras el plazo; revísala.")
+        return {"ok": True, "status": "manual", "result": False}
+    # None: inconcluyente, no concluimos nada.
+    audit.record("verify_deletion", acc, extra={"result": "inconclusive"})
+    db.log(account_id, "info", "verificación inconcluyente; sigue pendiente")
+    return {"ok": True, "status": "pending_deletion", "result": None}
+
+
+@app.post("/api/accounts/{account_id}/cancel-deletion")
+def api_cancel_deletion(account_id: int):
+    """Cancela un plazo de eliminación: limpia las fechas y manda la cuenta a
+    `manual` (revisar). No guardamos el estado previo, así que `manual` es el
+    destino seguro para que el usuario re-decida."""
+    acc = db.get_account(account_id)
+    if not acc:
+        raise HTTPException(404, "Cuenta no encontrada.")
+    db.update_account(account_id, deletion_eta=None, deletion_started_at=None)
+    audit.record("cancel_deletion", acc, extra={"via": "cancel_endpoint"})
+    db.set_status(account_id, "manual", "Plazo de eliminación cancelado por el usuario.")
+    return {"ok": True, "status": "manual"}
 
 
 @app.post("/api/accounts/clear")
@@ -729,7 +892,9 @@ def api_domain_report(domain: str):
     try:
         return {"report": json.loads(row["report"]),
                 "created_at": row["created_at"]}
-    except Exception:
+    except Exception as e:
+        log.warning("domain report de %s no parsea como JSON (%s); devuelvo null",
+                    domain, e)
         return {"report": None}
 
 

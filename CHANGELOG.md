@@ -10,6 +10,36 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- **Eliminación programada con cuenta regresiva** (FASE 4): cuando una
+  plataforma elimina tras un plazo ("en 30 días"), el usuario lo registra
+  desde `user_done`, `manual` o `semi_auto`. Columnas `deletion_eta` y
+  `deletion_started_at` (migración idempotente), estado `pending_deletion`,
+  y filtro propio "Plazos" en el dashboard. La cuenta regresiva (días
+  restantes + fecha final + barra de progreso) la computa el servidor con
+  el helper puro `deletion_progress` y la UI solo la renderiza. Endpoints
+  `POST /api/accounts/{id}/schedule-deletion` (`{days}` o `{eta}` con
+  preflight de propiedad 412 + audit), `…/cancel-deletion` y
+  `…/verify-deletion`. **Al vencer NO se auto-marca `deleted`**: la fila
+  pasa a "plazo vencido / presunta eliminación" y ofrece **Verificar**, que
+  reusa `engine.revisit_profile` (con guard anti-SSRF). En `dry_run`,
+  Verificar hace la lectura pero no muta estado.
+- Histórico de Domain Intelligence cableado en el dashboard: desplegable
+  de dominios ya analizados (`GET /api/domain/history`) y recarga del
+  último informe guardado al cargar la página (`GET /api/domain/report`),
+  sin volver a la red.
+
+### Fixed
+
+- El botón "Enviado" (`mark-sent`) ahora tiene estado de carga (spinner),
+  el polling no pisa la interacción en curso, y maneja el 412 de propiedad
+  abriendo el modal de confirmación. Además mandaba un body sin `action`
+  que provocaba un 422 silencioso; corregido.
+- Guard anti-SSRF en `engine.revisit_profile` (reusa `resolver._is_safe_url`):
+  antes hacía un GET sin filtrar el destino. `ALLOWED_HOSTS` se normaliza
+  a minúsculas.
+
+### Added (Domain Intelligence)
+
 - **Domain Intelligence** (`rastrillo/domain_intel.py`): recon OSINT
   defensivo sobre un dominio. WHOIS (registrador, fechas de
   creación/expiración/actualización, estados, nameservers, registrant),

@@ -5,12 +5,20 @@ const $=id=>document.getElementById(id);
 /* ── Estado global de la UI ───────────────────────────────── */
 let CURRENT_FILTER="all";
 
+/* Operaciones en vuelo. El polling (setInterval(load, 2000)) repinta la lista
+ * por innerHTML, lo que destruiría el botón que el usuario acaba de pulsar y su
+ * estado "Enviando…". Mientras haya una acción en curso (_inFlight>0), load()
+ * salta el repintado para no pisar la interacción. Se vuelve a refrescar en
+ * cuanto la operación termina (cada handler llama a load() al cerrar). */
+let _inFlight=0;
+
 /* Tono visual de cada estado (clases CSS, desacoplado de colores backend). */
 const TONE={
   found:"", queued:"info", in_progress:"warn",
   awaiting_user:"warn", deleted:"success", anonymized:"indigo",
   user_done:"success",
   semi_auto:"accent", email_draft:"indigo",
+  pending_deletion:"warn",
   manual:"warn", skipped:"", failed:"danger",
   not_mine:"", dry_run:"indigo",
 };
@@ -26,6 +34,7 @@ const GROUPS={
   pending  :["queued","in_progress"],
   your_turn:["semi_auto","email_draft","awaiting_user"],   /* 1 clic / 1 envío / 1 confirmación */
   action   :["semi_auto","email_draft","awaiting_user","manual","failed"],
+  deadlines:["pending_deletion"],   /* FASE 4: cuentas con cuenta regresiva */
   done     :["deleted","anonymized","user_done","dry_run"],
   kept     :["skipped"],
   discarded:["not_mine"],
@@ -62,6 +71,7 @@ const ICONS={
   sparkles:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>',
   external:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M14 14v6H4V4h6"/></svg>',
   mail:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
+  clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   copy:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"/></svg>',
   x:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18 18 6"/></svg>',
@@ -189,16 +199,30 @@ function actionsFor(a){
       ? `<a class="btn btn-sm btn-accent" href="${escapeAttr(a.profile_url)}" target="_blank" rel="noreferrer">${ic("external")}Abrir enlace</a>`
       : "";
     return link
-      + `<button class="btn btn-sm" onclick="markSent(${a.id})">${ic("check")}Hecho</button>`
+      + `<button class="btn btn-sm" onclick="markSent(${a.id}, this)">${ic("check")}Hecho</button>`
+      + schedBtn(id)
       + btnHtml("Reintentar","retry",id,{cls:"btn-ghost"});
   }
   if(a.status==="email_draft"){
     return `<button class="btn btn-sm btn-accent" onclick="openDraft(${a.id})">${ic("mail")}Ver borrador</button>`
-      + `<button class="btn btn-sm" onclick="markSent(${a.id})">Enviado</button>`
+      + `<button class="btn btn-sm" onclick="markSent(${a.id}, this)">Enviado</button>`
       + btnHtml("Reintentar","retry",id,{cls:"btn-ghost"});
   }
+  if(a.status==="pending_deletion"){
+    // Cuenta regresiva en curso. No interrumpimos: Verificar (solo si venció,
+    // reusa engine.revisit_profile), Reprogramar y Cancelar el plazo.
+    const overdue = a.deletion && a.deletion.overdue;
+    const verify = overdue
+      ? `<button class="btn btn-sm btn-primary" onclick="verifyDeletion(${id}, this)">${ic("check")}Verificar</button>`
+      : "";
+    return verify
+      + `<button class="btn btn-sm btn-ghost" onclick="openScheduleModal(${id})">Reprogramar</button>`
+      + `<button class="btn btn-sm btn-ghost" onclick="cancelDeletion(${id})">Cancelar plazo</button>`;
+  }
   if(a.status==="failed"||a.status==="manual"){
+    // "Programar plazo" solo en manual (estado de reposo); failed no.
     return btnHtml("Reintentar","retry",id)
+         + (a.status==="manual" ? schedBtn(id) : "")
          + btnHtml("Conservar","keep",id,{cls:"btn-ghost"});
   }
   if(a.status==="user_done"){
@@ -209,6 +233,7 @@ function actionsFor(a){
       ? `<button class="btn btn-sm btn-warn" onclick="openFollowup(${a.id})">${ic("mail")}Seguimiento</button>`
       : "";
     return followup
+      + schedBtn(id)
       + btnHtml("Reintentar","retry",id,{cls:"btn-ghost"});
   }
   if(a.status==="deleted"||a.status==="anonymized"||a.status==="skipped"){
@@ -216,6 +241,12 @@ function actionsFor(a){
   }
   // queued / in_progress: no interrumpimos al motor.
   return "";
+}
+/* Botón de entrada al flujo de eliminación programada (FASE 4). Aparece en los
+ * estados de reposo donde es plausible que la plataforma haya dado un plazo:
+ * user_done, manual y semi_auto. */
+function schedBtn(id){
+  return `<button class="btn btn-sm btn-accent" onclick="openScheduleModal(${id})">${ic("clock")}Programar plazo</button>`;
 }
 function renderRow(a){
   const cls=a.status==="awaiting_user"?"account-row attn":"account-row";
@@ -236,6 +267,19 @@ function renderRow(a){
       : `Enviada hace ${days}d`;
     sent = `<span class="dot">·</span><span class="badge ${tone}" title="GDPR: respuesta exigible en 30 días">${label}</span>`;
   }
+  // FASE 4: cuenta regresiva de eliminación. `a.deletion` lo computa el server
+  // (días restantes / overdue / pct); aquí solo renderizamos badge + fecha
+  // final + barra de progreso. No auto-marcamos deleted al vencer.
+  let deadlineMeta="", deadlineBar="";
+  if(a.status==="pending_deletion" && a.deletion){
+    const dd=a.deletion;
+    const fecha = a.deletion_eta ? new Date(a.deletion_eta*1000).toLocaleDateString() : "";
+    deadlineMeta = dd.overdue
+      ? `<span class="dot">·</span><span class="badge danger" title="El plazo venció el ${escapeAttr(fecha)}">Plazo vencido · presunta eliminación</span>`
+      : `<span class="dot">·</span><span class="badge warn" title="Fecha objetivo: ${escapeAttr(fecha)}">Eliminación en ${dd.days_left} d · ${escapeHtml(fecha)}</span>`;
+    const pct = Math.max(0, Math.min(100, dd.pct||0));
+    deadlineBar = `<div class="deadline-bar${dd.overdue?' overdue':''}" role="progressbar" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100" title="${dd.overdue?'Plazo vencido':'Progreso del plazo'}"><div class="deadline-fill" style="width:${pct}%"></div></div>`;
+  }
   const msg=SHOW_MSG.has(a.status) && a.last_message
     ? `<div class="row-msg">${linkify(escapeHtml(a.last_message))}</div>` : "";
   // Indicador de confianza: solo lo mostramos cuando NO está confirmada como
@@ -251,12 +295,13 @@ function renderRow(a){
     ${avatarFor(a)}
     <div class="row-main">
       <div class="row-title">${escapeHtml(a.display_name||a.platform)}${ownedMark}</div>
-      <div class="row-meta">${id}${site}${link}${sent}</div>
+      <div class="row-meta">${id}${site}${link}${sent}${deadlineMeta}</div>
     </div>
     ${conf}
     ${badgeFor(a)}
     <div class="row-actions">${actionsFor(a)}</div>
     ${msg}
+    ${deadlineBar}
   </div>`;
 }
 
@@ -343,6 +388,7 @@ function computeStats(stats, accounts){
     pending:   sum(GROUPS.pending) + owned_found,
     your_turn: sum(GROUPS.your_turn),
     action:    sum(GROUPS.action),
+    deadlines: sum(GROUPS.deadlines),
     done:      sum(GROUPS.done),
     kept:      sum(GROUPS.kept),
     discarded: sum(GROUPS.discarded),
@@ -411,6 +457,22 @@ function emptyFilter(){
 }
 
 /* ── Acciones de UI ────────────────────────────────── */
+/* Pone un botón en estado "ocupado": lo deshabilita y le pinta un spinner con
+ * etiqueta. Devuelve una función que restaura el estado original. Tolera btn
+ * nulo (cuando la acción se reintenta desde un modal y ya no hay botón). */
+function setBtnBusy(btn, busyLabel){
+  if(!btn) return ()=>{};
+  const prevHtml=btn.innerHTML;
+  const prevDisabled=btn.disabled;
+  btn.disabled=true;
+  btn.classList.add("is-busy");
+  btn.innerHTML=`<span class="spinner" aria-hidden="true"></span>${escapeHtml(busyLabel||"")}`;
+  return ()=>{
+    btn.disabled=prevDisabled;
+    btn.classList.remove("is-busy");
+    btn.innerHTML=prevHtml;
+  };
+}
 async function doAction(id, action, label){
   await doActionImpl(id, action, label, false);
 }
@@ -433,7 +495,12 @@ async function doActionImpl(id, action, label, confirmOwned){
  *   - Sí, es mía → reenvía la acción con confirm_owned=true
  *   - No es mía  → marca not_mine y cancela la acción
  *   - Cancelar   → no hace nada */
-function askOwnership(account, action, label){
+/* Callback opcional para "Sí, es mía": cuando una acción lleva payload que
+ * retryOwned no puede transportar (p.ej. schedule-deletion con days/eta), se
+ * pasa aquí y confirmOwnership lo invoca en vez de enrutar por retryOwned. */
+let _ownershipConfirm=null;
+function askOwnership(account, action, label, onConfirm){
+  _ownershipConfirm = onConfirm || null;
   const confLabel = CONF_LABEL[account.confidence] || "Confianza desconocida";
   const confTone  = CONF_TONE[account.confidence] || "warn";
   const idLine = account.identifier ? `<div class="kv"><b>Identificador:</b>${escapeHtml(account.identifier)}</div>`:"";
@@ -465,7 +532,7 @@ function askOwnership(account, action, label){
         No es mía
       </button>
       <button class="btn btn-primary"
-              onclick="closeModal(); doActionImpl(${account.id},'${escapeAttr(action)}','${escapeAttr(label||action)}', true)">
+              onclick="closeModal(); confirmOwnership(${account.id},'${escapeAttr(action)}','${escapeAttr(label||action)}')">
         Sí, es mía y procede
       </button>
     </div>
@@ -474,6 +541,27 @@ function askOwnership(account, action, label){
   m.onclick=(e)=>{ if(e.target===m) closeModal(); };
 }
 
+/* Dispatcher de "Sí, es mía": si quien abrió el modal dejó un callback
+ * (_ownershipConfirm), lo invocamos (lleva su propio payload); si no, caemos
+ * al reintento estándar por acción. */
+function confirmOwnership(id, action, label){
+  if(_ownershipConfirm){
+    const cb=_ownershipConfirm; _ownershipConfirm=null; cb();
+    return;
+  }
+  retryOwned(id, action, label);
+}
+/* Reintento tras confirmar propiedad desde el modal pre-vuelo. La acción
+ * "mark-sent" no la entiende el endpoint /action (daría 400 "Acción
+ * desconocida"): tiene su propio endpoint, así que la enrutamos a markSent.
+ * El resto de acciones (delete/anonymize/retry) van por doActionImpl. */
+function retryOwned(id, action, label){
+  if(action==="mark-sent"){
+    markSent(id, null, true);
+  } else {
+    doActionImpl(id, action, label, true);
+  }
+}
 async function discardFromPreflight(id){
   try{
     await postJSON(`/api/accounts/${id}/own`,{owned:false});
@@ -481,10 +569,131 @@ async function discardFromPreflight(id){
   } catch(e){ toast(e.message, 7000, "err"); }
   load();
 }
-async function markSent(id){
+async function markSent(id, btn, confirmOwned){
+  const restore=setBtnBusy(btn, "Enviando…");
+  _inFlight++;
   try{
-    await postJSON(`/api/accounts/${id}/mark-sent`,{});
+    // El endpoint valida el body contra ActionBody, donde `action` es
+    // obligatorio: sin él, FastAPI responde 422 (no 412) y el botón parecía
+    // "no hacer nada". Mandamos action aunque el server no lo use para decidir.
+    await postJSON(`/api/accounts/${id}/mark-sent`,
+                   {action:"mark-sent", confirm_owned: !!confirmOwned});
     toast("Marcada como hecha");
+  } catch(e){
+    // 412: la cuenta no estaba confirmada como tuya. Mismo flujo que las
+    // acciones destructivas: abrimos el modal de propiedad. Si el usuario
+    // confirma, se reintenta markSent con confirm_owned=true. NO recargamos
+    // aquí (el modal queda abierto); el reintento o el cierre llamarán a load.
+    if(e.preflight){
+      restore();
+      _inFlight--;
+      askOwnership(e.preflight.account, "mark-sent", "Enviado");
+      return;
+    }
+    toast(e.message, 7000, "err");
+  }
+  restore();
+  _inFlight--;
+  load();
+}
+
+/* ── FASE 4: eliminación programada con cuenta regresiva ───────────────────── */
+function openScheduleModal(id){
+  const t=new Date();
+  const todayStr=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+  const m=$("modal");
+  m.innerHTML=`<div class="modal" role="document" style="max-width:480px">
+    <div class="modal-head">
+      <h3 id="modal-title">Programar eliminación</h3>
+      <button class="btn btn-sm btn-icon btn-ghost modal-close" onclick="closeModal()" aria-label="Cerrar">${ic("x")}</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px">
+        Muchas plataformas eliminan tras un plazo ("en 30 días"). Registra ese
+        plazo y verás la cuenta regresiva. Al vencer <b>no se marca nada solo</b>:
+        te ofrecerá <b>Verificar</b>.
+      </div>
+      <label class="sched-opt">
+        <input type="radio" name="sched-mode" value="days" checked onchange="_schedMode('days')">
+        <span>Días restantes</span>
+        <input id="sched-days" class="input" type="number" min="1" max="3650" value="30">
+      </label>
+      <label class="sched-opt">
+        <input type="radio" name="sched-mode" value="date" onchange="_schedMode('date')">
+        <span>Fecha exacta</span>
+        <input id="sched-date" class="input" type="date" min="${todayStr}" disabled>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="submitSchedule(${id}, this)">Programar</button>
+    </div>
+  </div>`;
+  m.classList.add("on");
+  m.onclick=(e)=>{ if(e.target===m) closeModal(); };
+}
+function _schedMode(mode){
+  $("sched-days").disabled = mode!=="days";
+  $("sched-date").disabled = mode!=="date";
+}
+function submitSchedule(id, btn){
+  const mode=(document.querySelector('input[name="sched-mode"]:checked')||{}).value || "days";
+  let payload;
+  if(mode==="days"){
+    const days=parseInt($("sched-days").value,10);
+    if(!days || days<1){ toast("Indica un número de días válido", 3000, "err"); return; }
+    payload={days};
+  } else {
+    const v=$("sched-date").value;
+    if(!v){ toast("Elige una fecha", 3000, "err"); return; }
+    // Fin de día en hora LOCAL del usuario -> timestamp UNIX (segundos).
+    const eta=Math.floor(new Date(v+"T23:59:59").getTime()/1000);
+    if(!eta || eta<=Date.now()/1000){ toast("La fecha debe ser futura", 3000, "err"); return; }
+    payload={eta};
+  }
+  scheduleDeletion(id, payload, false, btn);
+}
+async function scheduleDeletion(id, payload, confirmOwned, btn){
+  const restore=setBtnBusy(btn, "Programando…");
+  _inFlight++;
+  try{
+    await postJSON(`/api/accounts/${id}/schedule-deletion`,
+                   Object.assign({}, payload, {confirm_owned: !!confirmOwned}));
+    toast("Plazo de eliminación programado");
+    closeModal();
+  } catch(e){
+    restore(); _inFlight--;
+    if(e.preflight){
+      // El payload (days/eta) no cabe en retryOwned; lo reintentamos vía callback.
+      askOwnership(e.preflight.account, "schedule-deletion", "Programar eliminación",
+                   ()=>scheduleDeletion(id, payload, true));
+    } else {
+      toast(e.message, 7000, "err");   // dejamos el modal abierto para corregir
+    }
+    return;
+  }
+  restore(); _inFlight--;
+  load();
+}
+async function verifyDeletion(id, btn){
+  const restore=setBtnBusy(btn, "Verificando…");
+  _inFlight++;
+  try{
+    const r=await postJSON(`/api/accounts/${id}/verify-deletion`, {});
+    if(r.dry_run){
+      toast("[simulación] verificación: " +
+        (r.result===true?"eliminada":r.result===false?"sigue activa":"inconcluso"));
+    } else if(r.result===true){ toast("Verificada: la cuenta ya no existe");
+    } else if(r.result===false){ toast("La cuenta sigue activa; revísala", 6000, "err");
+    } else { toast("No pude verificar; reintenta más tarde", 6000); }
+  } catch(e){ toast(e.message, 7000, "err"); }
+  restore(); _inFlight--;
+  load();
+}
+async function cancelDeletion(id){
+  try{
+    await postJSON(`/api/accounts/${id}/cancel-deletion`, {});
+    toast("Plazo cancelado");
   } catch(e){ toast(e.message, 7000, "err"); }
   load();
 }
@@ -604,6 +813,10 @@ function askClear(){
 
 /* ── Loop principal ────────────────────────────────── */
 async function load(){
+  // Hay una acción del usuario en vuelo (p.ej. "Enviado" con su spinner): no
+  // repintamos la lista para no destruir el botón ni su estado de carga. El
+  // handler de la acción llamará a load() en cuanto termine.
+  if(_inFlight>0) return;
   try{
     const [accRes, scanRes, dirRes] = await Promise.all([
       getJSON("/api/accounts"),
@@ -621,6 +834,7 @@ async function load(){
     $("f-pending").textContent=`Pendientes · ${stats.pending}`;
     $("f-your_turn").textContent=`Tu turno · ${stats.your_turn}`;
     $("f-action").textContent=`Acción · ${stats.action}`;
+    $("f-deadlines").textContent=`Plazos · ${stats.deadlines}`;
     $("f-done").textContent=`Completadas · ${stats.done}`;
     $("f-kept").textContent=`Conservadas · ${stats.kept}`;
     $("f-discarded").textContent=`Descartadas · ${stats.discarded}`;
@@ -798,6 +1012,54 @@ function renderDomainReport(rep){
     ${whois}${dns}${cors}${errs}
   </div>`;
 }
+/* ── Inteligencia de dominio: histórico (persistido en domain_reports) ──────
+ * El backend persiste un informe por dominio y expone /history y /report. Aquí
+ * los consumimos: al cargar la página poblamos el desplegable y mostramos el
+ * último informe guardado SIN re-analizar; al elegir un dominio recargamos su
+ * informe guardado (tampoco pega a la red). */
+function fmtDomDate(ts){
+  if(!ts) return "";
+  try{ return new Date(ts*1000).toLocaleDateString(); }catch(e){ return ""; }
+}
+async function fetchDomainHistory(){
+  try{
+    const r=await getAPI("/api/domain/history");
+    if(!r.ok) return [];
+    return (await r.json()).domains || [];
+  }catch(e){ return []; }
+}
+function populateDomainHistory(domains, selected){
+  const wrap=$("dom-history-wrap"), sel=$("dom-history");
+  if(!domains || !domains.length){ wrap.style.display="none"; sel.innerHTML=""; return; }
+  sel.innerHTML=domains.map(d=>
+    `<option value="${escapeAttr(d.domain)}">${escapeHtml(d.domain)} · ${escapeHtml(fmtDomDate(d.created_at))}</option>`
+  ).join("");
+  if(selected) sel.value=selected;
+  wrap.style.display="";
+}
+/* Carga un informe YA guardado (no re-analiza). Devuelve true si lo pinto. */
+async function loadDomainReport(domain){
+  if(!domain) return false;
+  try{
+    const r=await getAPI(`/api/domain/report?domain=${encodeURIComponent(domain)}`);
+    if(!r.ok) return false;
+    const data=await r.json();
+    if(data && data.report){
+      $("dom-result").innerHTML=renderDomainReport(data.report);
+      $("dom-input").value=domain;
+      $("dom-status").textContent="Informe guardado"
+        + (data.created_at?` · ${fmtDomDate(data.created_at)}`:"");
+      return true;
+    }
+  }catch(e){ /* conveniencia, no critico: si falla, el usuario re-analiza */ }
+  return false;
+}
+async function initDomainHistory(){
+  const domains=await fetchDomainHistory();
+  populateDomainHistory(domains, domains.length ? domains[0].domain : null);
+  if(domains.length){ await loadDomainReport(domains[0].domain); }  // ultimo guardado
+}
+
 async function analyzeDomain(){
   const raw=($("dom-input").value||"").trim().toLowerCase();
   if(!raw){ toast("Escribe un dominio", 3000, "err"); return; }
@@ -809,6 +1071,8 @@ async function analyzeDomain(){
     const rep=await postJSON("/api/domain/analyze",{domain:raw});
     $("dom-result").innerHTML=renderDomainReport(rep);
     st.textContent="Análisis completado";
+    // Refrescamos el histórico y dejamos seleccionado el dominio recién analizado.
+    populateDomainHistory(await fetchDomainHistory(), raw);
   } catch(e){
     st.textContent="";
     toast(e.message||"No pude analizar el dominio", 7000, "err");
@@ -820,6 +1084,8 @@ $("dom-btn").onclick=analyzeDomain;
 $("dom-input").addEventListener("keydown",(e)=>{
   if(e.key==="Enter"){ e.preventDefault(); analyzeDomain(); }
 });
+$("dom-history").onchange=function(){ loadDomainReport(this.value); };
+initDomainHistory();
 
 /* ── Toggle de tema ───────────────────────────────────────── */
 function applyTheme(theme, save){

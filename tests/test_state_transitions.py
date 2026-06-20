@@ -14,6 +14,9 @@
   - GET / (HTML shell) sigue libre porque el navegador entra sin header.
   - Host: header Host no en config.ALLOWED_HOSTS → 403 (anti DNS-rebinding).
 """
+import time
+from unittest import mock
+
 from .helpers import IsolatedTestCase, auth_client
 
 
@@ -151,6 +154,169 @@ class TestStateTransitions(IsolatedTestCase):
         r = self.client.post(f"/api/accounts/{aid}/mark-sent",
                              json={"action":"mark-sent"}, headers=self.hdr())
         self.assertEqual(r.status_code, 412)
+
+    def test_mark_sent_412_confirm_owned_user_done(self):
+        """FASE 2: cuenta sin owned → 412 con code de propiedad. Al reintentar
+        con confirm_owned=true, se marca owned=1 y pasa a user_done."""
+        aid = self.db.upsert_account("baby","alice",source="sherlock",
+            source_site="baby.ru", display_name="Baby", status="email_draft")
+        r1 = self.client.post(f"/api/accounts/{aid}/mark-sent",
+                              json={"action":"mark-sent"}, headers=self.hdr())
+        self.assertEqual(r1.status_code, 412)
+        self.assertEqual(r1.json()["detail"]["code"], "needs_ownership_confirmation")
+        r2 = self.client.post(f"/api/accounts/{aid}/mark-sent",
+                              json={"action":"mark-sent","confirm_owned":True},
+                              headers=self.hdr())
+        self.assertEqual(r2.status_code, 200)
+        row = self.db.get_account(aid)
+        self.assertEqual(row["status"], "user_done")
+        self.assertEqual(row["owned"], 1)
+        self.assertIsNotNone(row["sent_at"])
+
+    def test_mark_sent_semi_auto_con_email_to_guarda_sent_at(self):
+        """H3 (Opción B): una cuenta semi_auto cuya Resolution cacheada
+        (action_meta) lleva email_to SÍ registra sent_at, porque hay un
+        borrador de correo real detrás del envío."""
+        import json as _json
+        aid = self.db.upsert_account("foo","alice",source="sherlock",
+            source_site="foo.com", display_name="Foo",
+            status="semi_auto", owned=1,
+            action_meta=_json.dumps({"email_to":"privacy@foo.com"}))
+        r = self.client.post(f"/api/accounts/{aid}/mark-sent",
+                             json={"action":"mark-sent"}, headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        row = self.db.get_account(aid)
+        self.assertEqual(row["status"], "user_done")
+        self.assertIsNotNone(row["sent_at"])
+
+    # ── FASE 4: eliminación programada con cuenta regresiva ──
+    def _pending_account(self, status="user_done", owned=1):
+        return self.db.upsert_account("foo","alice",source="sherlock",
+            source_site="foo.com", display_name="Foo", status=status, owned=owned)
+
+    def test_schedule_deletion_days(self):
+        aid = self._pending_account()
+        r = self.client.post(f"/api/accounts/{aid}/schedule-deletion",
+                             json={"days":30}, headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        row = self.db.get_account(aid)
+        self.assertEqual(row["status"], "pending_deletion")
+        self.assertIsNotNone(row["deletion_started_at"])
+        # eta ≈ now + 30 días (tolerancia amplia para no depender del reloj)
+        expected = time.time() + 30*86400
+        self.assertAlmostEqual(row["deletion_eta"], expected, delta=120)
+
+    def test_schedule_deletion_eta_timestamp(self):
+        aid = self._pending_account()
+        eta = time.time() + 14*86400
+        r = self.client.post(f"/api/accounts/{aid}/schedule-deletion",
+                             json={"eta":eta}, headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        row = self.db.get_account(aid)
+        self.assertAlmostEqual(row["deletion_eta"], eta, delta=1)
+
+    def test_schedule_validation_400(self):
+        aid = self._pending_account()
+        bad = [
+            {},                                   # ni days ni eta
+            {"days":30, "eta":time.time()+86400}, # ambos
+            {"days":0},                           # fuera de rango
+            {"days":99999},                       # > 3650
+            {"eta":time.time()-86400},            # pasado
+            {"eta":time.time()+99999*86400},      # demasiado lejos
+        ]
+        for body in bad:
+            r = self.client.post(f"/api/accounts/{aid}/schedule-deletion",
+                                 json=body, headers=self.hdr())
+            self.assertEqual(r.status_code, 400, f"esperaba 400 para {body}")
+
+    def test_schedule_preflight_412_then_confirm(self):
+        aid = self._pending_account(status="manual", owned=0)
+        r1 = self.client.post(f"/api/accounts/{aid}/schedule-deletion",
+                              json={"days":30}, headers=self.hdr())
+        self.assertEqual(r1.status_code, 412)
+        self.assertEqual(r1.json()["detail"]["code"], "needs_ownership_confirmation")
+        r2 = self.client.post(f"/api/accounts/{aid}/schedule-deletion",
+                              json={"days":30, "confirm_owned":True}, headers=self.hdr())
+        self.assertEqual(r2.status_code, 200)
+        row = self.db.get_account(aid)
+        self.assertEqual(row["status"], "pending_deletion")
+        self.assertEqual(row["owned"], 1)
+
+    def test_deletion_progress_helper(self):
+        from rastrillo import server
+        now = 1_000_000.0
+        started = now - 10*86400
+        eta = now + 20*86400          # 20 días por delante, 10 transcurridos de 30
+        prog = server.deletion_progress(started, eta, now=now)
+        self.assertEqual(prog["days_left"], 20)
+        self.assertFalse(prog["overdue"])
+        self.assertAlmostEqual(prog["pct"], 33.3, delta=0.5)
+        # vencido
+        past = server.deletion_progress(started, now - 86400, now=now)
+        self.assertTrue(past["overdue"])
+        self.assertEqual(past["days_left"], 0)
+        self.assertEqual(past["pct"], 100.0)
+        # sin eta → None
+        self.assertIsNone(server.deletion_progress(started, None, now=now))
+
+    def test_accounts_payload_incluye_deletion(self):
+        aid = self._pending_account()
+        self.client.post(f"/api/accounts/{aid}/schedule-deletion",
+                         json={"days":30}, headers=self.hdr())
+        accts = self.client.get("/api/accounts", headers=self.hdr()).json()["accounts"]
+        row = next(a for a in accts if a["id"] == aid)
+        self.assertIsNotNone(row["deletion"])
+        self.assertIn("days_left", row["deletion"])
+        self.assertFalse(row["deletion"]["overdue"])
+
+    def test_verify_deletion_outcomes(self):
+        from rastrillo import engine
+        for result, expected in [(True,"deleted"), (False,"manual"), (None,"pending_deletion")]:
+            aid = self.db.upsert_account("foo", f"u{result}", source="sherlock",
+                source_site="foo.com", display_name="Foo",
+                status="pending_deletion", owned=1)
+            self.db.update_account(aid, profile_url="https://foo.com/u/x")
+            with mock.patch.object(engine, "revisit_profile", return_value=result):
+                r = self.client.post(f"/api/accounts/{aid}/verify-deletion",
+                                     headers=self.hdr())
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(self.db.get_account(aid)["status"], expected,
+                             f"result={result}")
+
+    def test_verify_deletion_dry_run_no_muta(self):
+        from rastrillo import engine
+        self.client.post("/api/dry-run", json={"enabled":True}, headers=self.hdr())
+        aid = self.db.upsert_account("foo","alice",source="sherlock",
+            source_site="foo.com", display_name="Foo",
+            status="pending_deletion", owned=1)
+        with mock.patch.object(engine, "revisit_profile", return_value=True):
+            r = self.client.post(f"/api/accounts/{aid}/verify-deletion",
+                                 headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["dry_run"])
+        # NO mutó: sigue pending_deletion pese a que revisit dijo True
+        self.assertEqual(self.db.get_account(aid)["status"], "pending_deletion")
+
+    def test_cancel_deletion(self):
+        aid = self._pending_account()
+        self.client.post(f"/api/accounts/{aid}/schedule-deletion",
+                         json={"days":30}, headers=self.hdr())
+        r = self.client.post(f"/api/accounts/{aid}/cancel-deletion", headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        row = self.db.get_account(aid)
+        self.assertEqual(row["status"], "manual")
+        self.assertIsNone(row["deletion_eta"])
+        self.assertIsNone(row["deletion_started_at"])
+
+    def test_migracion_columnas_deletion_idempotente(self):
+        # init() ya corrió en setUp; correrlo otra vez no debe romper y las
+        # columnas nuevas deben existir.
+        self.db.init()
+        with self.db.connect() as con:
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(accounts)")}
+        self.assertIn("deletion_eta", cols)
+        self.assertIn("deletion_started_at", cols)
 
     # ── dry-run ──
     def test_dry_run_no_encola(self):

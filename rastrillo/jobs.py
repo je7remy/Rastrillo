@@ -18,7 +18,6 @@ Invariantes que respeta este módulo:
 """
 import json
 import concurrent.futures
-import json
 import logging
 import os
 import queue

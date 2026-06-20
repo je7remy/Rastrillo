@@ -39,7 +39,7 @@ AUTH_TOKEN: str = os.environ.get("RASTRILLO_TOKEN") or secrets.token_urlsafe(24)
 # por defecto y no resuelve a nada en internet: aceptarlo no abre superficie.
 # Se puede ampliar con la env RASTRILLO_ALLOWED_HOSTS (lista separada por comas).
 ALLOWED_HOSTS: set = {
-    h.strip()
+    h.strip().lower()
     for h in (os.environ.get("RASTRILLO_ALLOWED_HOSTS")
               or "127.0.0.1:8765,localhost:8765,testserver").split(",")
     if h.strip()

@@ -267,6 +267,29 @@ class EndpointTest(IsolatedTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(r.json()["report"])
 
+    def test_history_requires_token(self):
+        client = auth_client()
+        r = client.get("/api/domain/history")
+        self.assertEqual(r.status_code, 401)
+
+    def test_history_lists_analyzed_domains(self):
+        from rastrillo import domain_intel
+        client = auth_client()
+        with mock.patch.object(domain_intel, "_whois_query", _fake_whois_query), \
+                mock.patch.object(domain_intel, "_dns_query", _fake_dns_query):
+            client.post("/api/domain/analyze",
+                        json={"domain": "example.com"}, headers=self.hdr())
+            client.post("/api/domain/analyze",
+                        json={"domain": "example.org"}, headers=self.hdr())
+        r = client.get("/api/domain/history", headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        domains = r.json()["domains"]
+        names = {d["domain"] for d in domains}
+        self.assertIn("example.com", names)
+        self.assertIn("example.org", names)
+        # cada entrada lleva domain + created_at (lo que el desplegable necesita)
+        self.assertTrue(all("created_at" in d for d in domains))
+
 
 if __name__ == "__main__":
     unittest.main()

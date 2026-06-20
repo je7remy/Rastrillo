@@ -103,6 +103,7 @@
         <button class="filter"    id="f-pending"   data-f="pending"   onclick="setFilter('pending')"   role="tab">Pendientes</button>
         <button class="filter"    id="f-your_turn" data-f="your_turn" onclick="setFilter('your_turn')" role="tab">Tu turno</button>
         <button class="filter"    id="f-action"    data-f="action"    onclick="setFilter('action')"    role="tab">Acción</button>
+        <button class="filter"    id="f-deadlines" data-f="deadlines" onclick="setFilter('deadlines')" role="tab">Plazos</button>
         <button class="filter"    id="f-done"      data-f="done"      onclick="setFilter('done')"      role="tab">Completadas</button>
         <button class="filter"    id="f-kept"      data-f="kept"      onclick="setFilter('kept')"      role="tab">Conservadas</button>
         <button class="filter"    id="f-discarded" data-f="discarded" onclick="setFilter('discarded')" role="tab">Descartadas</button>
@@ -154,6 +155,13 @@
         Analizar
       </button>
       <span id="dom-status" class="status"></span>
+    </div>
+    <!-- Histórico: dominios ya analizados (persistidos en domain_reports). Al
+         seleccionar uno se recarga su informe guardado SIN volver a la red.
+         Oculto mientras no haya nada analizado. -->
+    <div id="dom-history-wrap" class="field" style="display:none">
+      <label class="field-label" for="dom-history">Analizados antes</label>
+      <select id="dom-history" class="input"></select>
     </div>
     <div id="dom-result" class="dom-result" aria-live="polite"></div>
   </section>

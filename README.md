@@ -59,6 +59,7 @@
 - 🧑‍✈️ **Human-in-the-loop** — CAPTCHA, 2FA y confirmaciones se pasan al usuario.
 - 🧠 **Aprende sobre la marcha** — la secuencia que cierra un borrado se serializa como receta para el próximo run.
 - 🔐 **Cero contraseñas guardadas** — solo perfil de Chromium persistente.
+- ⏳ **Eliminación programada** — registra el plazo que da la plataforma ("en 30 días"), con cuenta regresiva, fecha final y barra de progreso. Al vencer no marca nada solo: ofrece **Verificar**.
 - 💾 **Resumible** — `current_step` y hash de receta persistidos, audit log append-only, backup de DB antes de borrados masivos.
 - 🧪 **Modo simulación** — flujo completo sin disparar la acción destructiva final.
 - 📤 **Informe exportable** — JSON, CSV o PDF.

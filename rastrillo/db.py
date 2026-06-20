@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     action_meta TEXT,           -- JSON con la Resolution del resolver (link, email, etc.)
     confidence TEXT,            -- high | medium | low (sherlock genera falsos positivos)
     owned INTEGER DEFAULT 0,    -- 1 = el usuario confirmó "es mía"; 0 = sin confirmar
-    sent_at REAL                -- timestamp UNIX de cuándo se envió la solicitud GDPR
+    sent_at REAL,               -- timestamp UNIX de cuándo se envió la solicitud GDPR
+    deletion_eta REAL,          -- timestamp UNIX objetivo: cuándo la plataforma dice que se elimina
+    deletion_started_at REAL    -- timestamp UNIX de cuándo el usuario fijó el plazo (ancla del progreso)
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -187,6 +189,10 @@ def init():
             con.execute("ALTER TABLE accounts ADD COLUMN owned INTEGER DEFAULT 0")
         if "sent_at" not in cols:
             con.execute("ALTER TABLE accounts ADD COLUMN sent_at REAL")
+        if "deletion_eta" not in cols:
+            con.execute("ALTER TABLE accounts ADD COLUMN deletion_eta REAL")
+        if "deletion_started_at" not in cols:
+            con.execute("ALTER TABLE accounts ADD COLUMN deletion_started_at REAL")
 
         # 3) Si la tabla aún tiene UNIQUE(platform, identifier) heredada, la
         # recreamos sin esa constraint (causaba colapso de hallazgos).
