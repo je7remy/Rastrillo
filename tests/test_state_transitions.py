@@ -51,6 +51,21 @@ class TestStateTransitions(IsolatedTestCase):
         la primera carga; el JS lee `?token=` y lo manda en /api/*."""
         self.assertEqual(self.client.get("/").status_code, 200)
 
+    def test_get_root_assets_versionados(self):
+        """Cache-busting: app.js y styles.css se sirven con ?v=<hash>, y el
+        hash es el del contenido real (cambia cuando cambia el archivo)."""
+        import hashlib
+        from rastrillo import server
+        html = self.client.get("/").text
+        av = server._asset_version("app.js")
+        cv = server._asset_version("styles.css")
+        self.assertIn(f"/static/app.js?v={av}", html)
+        self.assertIn(f"/static/styles.css?v={cv}", html)
+        self.assertRegex(av, r"^[0-9a-f]{10}$")
+        # v == sha256(contenido)[:10]: garantiza que cambia con el contenido.
+        data = (server._STATIC_DIR / "app.js").read_bytes()
+        self.assertEqual(av, hashlib.sha256(data).hexdigest()[:10])
+
     def test_host_no_permitido_es_403(self):
         """Anti DNS-rebinding: aunque venga el token, un Host fuera de la
         allowlist se rechaza antes."""

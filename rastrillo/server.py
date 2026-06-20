@@ -22,6 +22,7 @@ Endpoints:
 Auth: middleware exige X-Rastrillo-Token (o ?token=) en TODOS los POST.
 GET son libres (lectura). El token vive en config.AUTH_TOKEN (env-override).
 """
+import hashlib
 import json
 import logging
 import math
@@ -944,10 +945,31 @@ def _boot_script() -> str:
     )
 
 
+def _asset_version(filename: str) -> str:
+    """Hash corto del contenido de un asset de `static/`, para cache-busting.
+
+    Se inyecta como `?v=<hash>` en la etiqueta del HTML servido por GET /.
+    Al basarse en el contenido (no en mtime), cambia EXACTAMENTE cuando cambia
+    el archivo, forzando al navegador a re-bajar la versión nueva y nunca
+    servir una cacheada vieja. Si el archivo no existe, degrada a "0"."""
+    try:
+        data = (_STATIC_DIR / filename).read_bytes()
+    except OSError:
+        return "0"
+    return hashlib.sha256(data).hexdigest()[:10]
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    return html.replace("<!--RASTRILLO_BOOT-->", _boot_script())
+    html = html.replace("<!--RASTRILLO_BOOT-->", _boot_script())
+    # Cache-busting: cada asset lleva su propio hash de contenido. Reemplazamos
+    # la URL exacta (con la comilla de cierre) para no tocar otras apariciones.
+    html = html.replace('/static/app.js"',
+                        f'/static/app.js?v={_asset_version("app.js")}"')
+    html = html.replace('/static/styles.css"',
+                        f'/static/styles.css?v={_asset_version("styles.css")}"')
+    return html
 
 
 # --- Arranque desde "python -m rastrillo.server" ----------------------------
