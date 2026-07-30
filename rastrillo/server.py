@@ -209,6 +209,27 @@ def deletion_progress(started_at, eta, now=None) -> Optional[dict]:
     return {"days_left": days_left, "overdue": bool(overdue), "pct": round(pct, 1)}
 
 
+def _deletion_url(action_meta, profile_url):
+    """URL de borrado que guardó el resolver en `action_meta`, o None.
+
+    Devuelve None si no hay Resolution, si su JSON está corrupto (misma
+    tolerancia que `db.parse_reasons`: mejor sin enlace que una vista rota) o
+    si coincide con la del hit, para no pintar el mismo enlace dos veces.
+    """
+    if not action_meta:
+        return None
+    try:
+        meta = json.loads(action_meta)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    url = (meta.get("url") or "").strip() or None
+    if url and url == (profile_url or "").strip():
+        return None
+    return url
+
+
 @app.get("/api/accounts")
 def api_accounts():
     rows = []
@@ -221,6 +242,12 @@ def api_accounts():
         # Motivos de la confianza: la columna guarda JSON (como action_meta);
         # la UI recibe la lista ya parseada para no repetir el json.parse.
         d["confidence_reasons"] = db.parse_reasons(d.get("confidence_reasons"))
+        # URL de BORRADO (directorio/resolver), separada de `profile_url`, que
+        # es la URL del HIT. Antes el resolver pisaba `profile_url` y el triage
+        # enseñaba una URL de borrado bajo la etiqueta "perfil", contradiciendo
+        # los chips de confianza —calculados sobre la del hit—. Ahora van como
+        # dos enlaces distintos. `None` si no hay o si coincide con la del hit.
+        d["deletion_url"] = _deletion_url(d.get("action_meta"), d.get("profile_url"))
         rows.append(d)
     return JSONResponse({
         "accounts": rows,
@@ -256,12 +283,14 @@ def _apply_resolution(account_id: int, res: resolver.Resolution,
     Devuelve {ok, status} para que el endpoint lo refleje al cliente.
 
     - kind=auto       → encolar al motor (o simular si dry_run).
-    - kind=semi_auto  → estado `semi_auto`, URL en profile_url.
+    - kind=semi_auto  → estado `semi_auto`, URL en action_meta.
     - kind=email_draft → estado `email_draft`, borrador en action_meta.
+
+    La URL de borrado NO pisa `profile_url` (ver `db.backfill_profile_url`):
+    esa columna guarda la URL del hit, que es lo que enseña el triage.
     """
     db.update_account(account_id, action_meta=json.dumps(res.to_meta(), ensure_ascii=False))
-    if res.url:
-        db.update_account(account_id, profile_url=res.url)
+    db.backfill_profile_url(account_id, res.url)
 
     if res.kind == "auto":
         if dry_run:
@@ -444,10 +473,10 @@ def api_process_all_auto():
         except Exception as e:
             db.log(row["id"], "warn", f"process_all_auto resolver falló: {e}")
             continue
-        # Persistimos la Resolution siempre.
+        # Persistimos la Resolution siempre. `profile_url` solo se rellena si
+        # está vacía: la URL del hit manda (ver `db.backfill_profile_url`).
         db.update_account(row["id"], action_meta=json.dumps(res.to_meta(), ensure_ascii=False))
-        if res.url:
-            db.update_account(row["id"], profile_url=res.url)
+        db.backfill_profile_url(row["id"], res.url)
         if res.kind == "auto":
             audit.record("delete", row, dry_run=dry_run,
                          extra={"via": "process_all_auto", "route": "resolver",

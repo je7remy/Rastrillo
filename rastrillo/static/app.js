@@ -39,6 +39,8 @@ const REASON_LABEL={
   bump_subdominio:"coincide en subdominio",
   corrob_misma_fila:"2 buscadores",
   corrob_cruzada:"email + username",
+  canario_indiscriminado:"el sitio responde a cualquiera",
+  canario_discrimina:"el sitio verifica usuarios",
   fuente_holehe:"email confirmado",
   fuente_hibp:"brecha de datos",
   hibp_no_sitio:"volcado sin verificar",
@@ -274,8 +276,15 @@ function renderRow(a){
   const id=a.identifier?escapeHtml(a.identifier):"";
   const site=a.source_site && a.source_site.toLowerCase()!==(a.display_name||"").toLowerCase()
     ? `<span class="dot">·</span>${escapeHtml(a.source_site)}` : "";
+  /* "perfil" = la URL DEL HIT (la que produjo el descubrimiento y sobre la que
+   * se calcularon los chips de motivo). La URL de borrado que trae el resolver
+   * es otra cosa y va con su propia etiqueta: mezclarlas hacía que un chip
+   * como "coincide en la ruta" pareciese mentir. */
   const link=a.profile_url
     ? `<span class="dot">·</span><a href="${escapeAttr(a.profile_url)}" target="_blank" rel="noreferrer">perfil</a>`
+    : "";
+  const delLink=a.deletion_url
+    ? `<span class="dot">·</span><a href="${escapeAttr(a.deletion_url)}" target="_blank" rel="noreferrer" title="Página de baja según el directorio o el resolver">cómo darse de baja</a>`
     : "";
   // Seguimiento GDPR: si la cuenta tiene sent_at, calculamos días + estado
   let sent="";
@@ -317,7 +326,7 @@ function renderRow(a){
     ${avatarFor(a)}
     <div class="row-main">
       <div class="row-title">${escapeHtml(a.display_name||a.platform)}${ownedMark}</div>
-      <div class="row-meta">${id}${site}${link}${sent}${deadlineMeta}</div>
+      <div class="row-meta">${id}${site}${link}${delLink}${sent}${deadlineMeta}</div>
       ${reasonChips(a)}
     </div>
     ${conf}
@@ -910,6 +919,8 @@ async function load(){
       if(ph === "resolving"){
         const tot = scanRes.total||0, done = scanRes.resolved||0;
         label = tot>0 ? `Resolviendo ${done}/${tot}…` : "Resolviendo…";
+      } else if(ph === "canario"){
+        label = "Comprobando sitios…";
       } else {
         // discovery o phase desconocida
         label = "Descubriendo…";

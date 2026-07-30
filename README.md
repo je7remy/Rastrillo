@@ -268,10 +268,14 @@ Flujo típico:
    esa confianza: por qué subió o bajó. Por ejemplo *"username corto"*,
    *"coincide en la ruta"*, *"coincide en subdominio"*, *"email + username"*
    (dos fuentes independientes vieron el mismo sitio), *"2 buscadores"*,
-   *"brecha de datos"*. Pasa el ratón por encima para la explicación
-   completa. Los chips solo aparecen mientras la cuenta no esté confirmada
-   como tuya, que es cuando sirven. Con eso puedes usar **Descartar low**
-   en lote sin miedo.
+   *"brecha de datos"*, *"el sitio responde a cualquiera"*. Pasa el ratón por
+   encima para la explicación completa. Los chips solo aparecen mientras la
+   cuenta no esté confirmada como tuya, que es cuando sirven. Con eso puedes
+   usar **Descartar low** en lote sin miedo.
+
+   El enlace **perfil** de cada fila es la URL del hallazgo, la misma sobre la
+   que se calcularon esos chips. Si el resolver además encontró la página de
+   baja, va aparte como **cómo darse de baja**.
 3. Para cada cuenta confirmada: **Eliminar**, **Anonimizar** o **Conservar**.
    Las profesionales (`tiktok`, `instagram`, `linkedin`, `github`) salen como
    conservadas por defecto.
@@ -286,6 +290,21 @@ Tareas sin abrir UI (debug, scripts, automatización):
 ./rastrillo.sh scan --user je7remy --email tu@correo.com   # discovery headless
 ./rastrillo.sh list [--status STATUS]                      # lista la DB
 ./rastrillo.sh report --format json|csv|pdf --out FILE     # exporta informe
+./rastrillo.sh canario https://sitio.com/u/je7remy         # ¿el sitio verifica usuarios?
+```
+
+`canario` es el helper de debug del canario a nivel de sitio: pregunta al sitio
+por dos usernames inventados y te enseña la evidencia cruda (status de cada
+uno, marcadores de "no existe", similitud entre los cuerpos, veredicto y por
+qué). **No toca la DB ni la caché de veredictos.** Acepta también un host pelado
+(`./rastrillo.sh canario baby.ru`) y `--user` para decirle qué identificador
+sustituir. Ejemplo real:
+
+```
+→ https://cavalier.hudsonrock.com/api/...?username=nwglmttgy    status=200
+→ https://cavalier.hudsonrock.com/api/...?username=onchim6bp7z1 status=200
+  similitud entre los dos cuerpos: 100.0% (umbral 95%)
+  VEREDICTO: indiscriminado
 ```
 
 (En Windows sustituye `./rastrillo.sh` por `.\rastrillo.ps1`.)
@@ -372,6 +391,7 @@ rastrillo/
 │   ├── config.py           # Rutas, tokens, flags
 │   ├── db.py               # SQLite + migraciones
 │   ├── discovery.py        # Wrappers Sherlock/Holehe/Maigret/HIBP
+│   ├── canario.py          # Canario a nivel de sitio (2 falsos, veredicto cacheado)
 │   ├── directory.py        # Cliente JustDeleteMe
 │   ├── resolver.py         # Resolver por capas
 │   ├── recipes.py          # Loader de recetas JSON
@@ -389,8 +409,10 @@ rastrillo/
 │   ├── recipes/            # Recetas de ejemplo
 │   └── static/             # Frontend (index.html + css + js)
 │
-├── tests/                  # 247 tests con unittest stdlib
+├── tests/                  # 292 tests con unittest stdlib
 │   ├── test_confidence_signals.py  # Confianza y falsos positivos (offline)
+│   ├── test_canario.py         # Canario a nivel de sitio (offline, red mockeada)
+│   ├── test_url_del_hit.py     # Frontera `@ ~ #` + la URL del hit en el triage
 │   ├── test_domain_intel.py    # Domain Intelligence (offline, red mockeada)
 │   └── test_resolve_tool.py    # Capa de web search del resolver
 ├── packaging/aur/PKGBUILD  # Empaquetado Arch
@@ -401,7 +423,7 @@ rastrillo/
 
 ## ⚙️ Variables de entorno
 
-Las 18 reales del código:
+Las 19 reales del código:
 
 | Variable | Default | Para qué |
 |---|---|---|
@@ -418,6 +440,7 @@ Las 18 reales del código:
 | `RASTRILLO_RESOLVER_WORKERS` | `5` (rango efectivo [1, 16]) | Pool del auto-resolver |
 | `RASTRILLO_PROBE_DELAY` | `1.5` | Segundos entre GETs al mismo host |
 | `RASTRILLO_DIR_MAX_AGE_DAYS` | `30` | Edad max del directorio antes de refresh auto |
+| `RASTRILLO_CANARIO_MAX_AGE_DAYS` | `30` | Edad max de un veredicto del canario antes de re-probar el sitio |
 | `RASTRILLO_SHERLOCK_TIMEOUT` | `900` | Timeout global de Sherlock (mín 10 s) |
 | `RASTRILLO_SHERLOCK_SITE_TIMEOUT` | `60` | Timeout per-site de Sherlock (mín 10 s) |
 | `RASTRILLO_HOLEHE_TIMEOUT` | `600` | Timeout global de Holehe (mín 10 s) |

@@ -62,8 +62,12 @@ con la plantilla GDPR estática en uno de los 6 idiomas soportados.
 ## Mapa del código
 
 `cli.py` — entrypoint. Sin argumentos arranca el dashboard, abre el
-navegador con el token en la URL y queda corriendo. Subcomandos `list` y
-`run` son auxiliares de debug. Instalado como `rastrillo` y `rs` vía
+navegador con el token en la URL y queda corriendo. Subcomandos `list`,
+`run` y `canario` son auxiliares de debug. `rastrillo canario URL|HOST
+[--user U] [--token T --token T]` corre el canario contra UN sitio y vuelca
+la evidencia cruda (status de cada falso, bytes, marcadores, similitud,
+veredicto y por qué) SIN escribir en la DB ni en la caché de veredictos —
+es con lo que se valida el mecanismo a mano contra un sitio concreto. Instalado como `rastrillo` y `rs` vía
 `pyproject.toml`. Los shims viven en `.venv/(bin|Scripts)/` y esa carpeta
 no está en el `PATH` global del usuario: para invocar el comando hay que
 usar los wrappers (`rastrillo.sh`/`rastrillo.ps1`/`rastrillo.cmd`),
@@ -83,6 +87,18 @@ unicidad de cuentas se hace en código por `(source_site, identifier)` —
 NO con UNIQUE en SQL — para no colapsar Reddit y RedditGifts.
 `snapshot_db()` copia la DB a `~/.rastrillo/backups/` antes de
 `clear_accounts`.
+`profile_url` guarda la URL DEL HIT — la que produjo el descubrimiento y
+sobre la que se calcularon los motivos de confianza. `backfill_profile_url()`
+la rellena SOLO si está vacía (holehe/hibp nunca traen URL). Los CUATRO
+caminos que escribían ahí la URL de borrado del resolver pasan hoy por ese
+helper (`jobs._resolve_one`, `server._apply_resolution`,
+`process-all-auto` y `engine.run_account` por la rama sin receta); si añades
+un quinto, úsalo también. La URL de borrado viaja en `action_meta.url` y
+llega a la UI como el campo computado `deletion_url` de `GET /api/accounts`.
+Pisarla hacía que el triage enseñara una URL de borrado bajo la etiqueta
+"perfil" mientras los chips describían otra, y a ojo parecía que el chip
+mentía. En `engine` además sale ganando la lógica anti-falso-`deleted`:
+`_confirm_and_seal` revisita el perfil real en vez de la página de baja.
 `confidence_reasons` guarda el POR QUÉ de la confianza como JSON
 `[{code, desc}]`, serializado igual que `action_meta`; helpers
 `parse_reasons` (tolerante: [] si falta o está corrupto), `dump_reasons` y
@@ -104,16 +120,20 @@ longitud y distintividad del username). Cada decisión deja motivos
 
 El bump de `_sherlock_confidence` pasa por `_identificador_en_url()`
 (`urllib.parse.urlsplit`, sin red), que concede señal SOLO si el
-identificador aparece (a) en el path o el query string **como segmento
-completo**, o (b) como etiqueta más a la izquierda del host **con igualdad
-exacta** (`jeremy.tumblr.com`). Aparecer a media palabra en cualquiera de
-los dos NO cuenta: el viejo `identifier in url` casaba dentro del dominio
-(`ana` subía de tramo por `banana.com`) y era la fuente más directa de
-falsos positivos. La frontera de (a) la impone `_match_con_frontera()`:
-exige separador (`/ - _ . = ? &`) o extremo de cadena a cada lado, y
-recorre TODAS las apariciones (que la primera no valga no descarta una
-posterior legítima: `/marca/mar`). Sin esa frontera el mismo bug revivía
-movido de componente — `mar` casaba en `/marca-noticias/123`.
+identificador aparece (a) en el path, el query string o el fragmento **como
+segmento completo**, o (b) como etiqueta más a la izquierda del host **con
+igualdad exacta** (`jeremy.tumblr.com`). Aparecer a media palabra en
+cualquiera de los dos NO cuenta: el viejo `identifier in url` casaba dentro
+del dominio (`ana` subía de tramo por `banana.com`) y era la fuente más
+directa de falsos positivos. La frontera de (a) la impone
+`_match_con_frontera()`: exige separador (`_SEPARADORES_URL`, hoy
+`/ - _ . = ? & @ ~ #`) o extremo de cadena a cada lado, y recorre TODAS las
+apariciones (que la primera no valga no descarta una posterior legítima:
+`/marca/mar`). Sin esa frontera el mismo bug revivía movido de componente —
+`mar` casaba en `/marca-noticias/123`. `@` salió de un escaneo real
+(`tiktok.com/@usuario` perdía el bump); `#` va acompañado de que el
+haystack incluya el **fragmento**, que `urlsplit` saca del path y antes se
+perdía entero (hay SPAs con el perfil en `/#/user/nombre`).
 La escala base (`len>=8`, `len>=6`+distintivo, `len>=5`, resto) NO cambió.
 
 `_corroborar_entre_fuentes()` es un pase final de `discover()`, SIN red:
@@ -137,6 +157,37 @@ agregados tipo "Collection #1". Las que sí traen dominio pero llevan
 `IsSpamList`, `IsFabricated` o `IsVerified=false` entran al discovery
 marcadas con `no_site=True` → `_register` les pone el motivo
 `hibp_no_sitio` y quedan excluidas de la corroboración (no del discovery).
+
+`rastrillo/canario.py` — **canario a nivel de sitio**. Pregunta a un sitio
+por DOS usernames falsos y compara los dos canarios ENTRE SÍ (nunca contra
+el perfil real del usuario: así el veredicto es del SITIO y no del
+identificador, y no le anunciamos a nadie que miramos ese username).
+Veredictos: `indiscriminado` (dos 200, cuerpos ≥95% iguales por
+`difflib.SequenceMatcher` sobre texto normalizado, y SIN marcadores de "no
+existe" en los 6 idiomas), `discrimina` (4xx o marcador presente),
+`indeterminado` (timeout/excepción/URL no construible). Aplicación en
+`_aplicar_a_fila`: bajar a `low` ante un `indiscriminado` es la ÚNICA vía
+por la que este módulo toca `confidence`, y solo la aplica a las fuentes
+HEURÍSTICAS — reusa `discovery._FUENTES_HEURISTICAS`, no duplica la tupla.
+La señal ajusta estimaciones, nunca políticas: el `high` de holehe se basa
+en que el email es identificador único y holehe ni consulta la página de
+perfil (usa flujos de recuperación), así que el veredicto no es evidencia
+sobre esa fila; igual el `medium` de hibp. El motivo
+(`canario_indiscriminado`) sí se anota en TODAS las filas del sitio —
+describe al sitio, no a la fila—, mismo criterio que `corrob_cruzada` en
+2A. `discrimina` solo anota: **el canario nunca sube la confianza**.
+`indeterminado` no penaliza, no anota y NO se cachea. Caché por
+host en `~/.rastrillo/canario.json` con TTL
+(`RASTRILLO_CANARIO_MAX_AGE_DAYS`, default 30), patrón de `directory.py`:
+con caché fresca, cero red. Solo filas con `profile_url`, lo que excluye
+estructuralmente holehe y hibp. **Exactamente 2 peticiones por sitio no
+cacheado**, nunca por fila. Guarda anti-SSRF vía `resolver._is_safe_url`
+(precedente cross-module en `engine.py:85`) aplicada ANTES del GET; throttle
+y timeout vía `resolver._http_get` (`RASTRILLO_PROBE_DELAY`); pool con
+`RASTRILLO_RESOLVER_WORKERS` (`_workers()` duplica cuatro líneas de
+`jobs._resolver_workers` a propósito: importar `jobs` cerraría el ciclo).
+Las dos primitivas de red (`http_get`, `url_segura`) son inyectables por
+parámetro, como en `domain_intel.py`. Debug a mano: `rastrillo canario`.
 
 `rastrillo/directory.py` — directorio público (JustDeleteMe). Fetch
 remoto + caché + lookup por host (exacto y por sufijo para subdominios).
@@ -226,7 +277,11 @@ Playwright (siempre un worker único; no abrimos N Chromiums). Pool
 acotado SOLO para las capas HTTP del resolver
 (`RASTRILLO_RESOLVER_WORKERS`, default 5). `web_pause_handler` bloquea
 con un Event hasta que la UI confirme. `scan_async` lanza discovery en
-thread y, al terminar, dispara el auto-resolver para precalcular la
+thread y, al terminar, corre el **canario** (fase `canario`; entre discovery
+y auto-resolver a propósito: `profile_url` todavía es la URL del hit, que es
+la plantilla que el canario necesita, y así el auto-resolver no gasta
+peticiones planificando el borrado de sitios recién invalidados; un fallo
+ahí no aborta el escaneo) y después el auto-resolver para precalcular la
 Resolution de las cuentas pendientes (excluyendo HIBP no confirmadas).
 También hay refresh automático del directorio al arrancar si la caché
 está vieja.
@@ -339,6 +394,22 @@ Archivos:
   list / fabricada / sin verificar no corroboran pero siguen en el
   discovery), y persistencia de motivos (migración idempotente, round-trip,
   `parse_reasons` tolerante a basura, la API los devuelve ya parseados).
+- `tests/test_url_del_hit.py` — Paso 2B Entrega 1: `@ ~ #` como frontera de
+  segmento (TikTok `/@usuario`, `~usuario`, fragmento) sin aflojar nada de
+  2A; y que el triage exponga la URL DEL HIT (`profile_url` no se pisa en
+  las tres escrituras del resolver, backfill solo si está vacía,
+  `deletion_url` en el payload de `/api/accounts`).
+- `tests/test_canario.py` — canario a nivel de sitio, offline con `http_get`
+  y `url_segura` inyectados: los tres veredictos, el marcador de "no existe"
+  que evita el falso veredicto (español y alemán), `indeterminado` que no
+  penaliza ni se cachea, la caché (fresca → cero peticiones; vencida por TTL
+  → se repite; corrupta → no revienta), 3 hits del mismo host = 2 peticiones,
+  hits sin `url` = cero peticiones, la guarda de red (`http://`, `localhost`,
+  IP privada), que `discrimina` nunca sube el tramo, que holehe/hibp/manual
+  reciben el motivo pero conservan su tramo, la plausibilidad de los tokens y
+  la construcción de la URL del canario. Cierra con un barrido de
+  (fuente × tramo × veredicto) que fija el invariante: la caída a `low` es la
+  única vía por la que el canario toca `confidence`.
 - `tests/test_domain_intel.py` — Domain Intelligence offline: parseo
   WHOIS recursivo y DNS desde fixtures (primitivas de red mockeadas),
   reglas de correlación (MX→Google, NS→Cloudflare, SPF, verificaciones
@@ -346,7 +417,7 @@ Archivos:
   guard anti-SSRF del socket WHOIS, y los endpoints (401 sin token, 400
   dominio inválido, happy-path con persistencia).
 
-Alrededor de 247 tests en menos de un minuto. Antes de cualquier cambio
+Alrededor de 292 tests en menos de un minuto. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -370,6 +441,7 @@ Eso es lo que hace `test_engine_html_local.py`.
 | `RASTRILLO_RESOLVER_WORKERS` | 5 (cap 16) | Pool del auto-resolver |
 | `RASTRILLO_PROBE_DELAY` | 1.5 | Segundos entre GETs al mismo host |
 | `RASTRILLO_DIR_MAX_AGE_DAYS` | 30 | Edad max del directorio antes de refresh auto |
+| `RASTRILLO_CANARIO_MAX_AGE_DAYS` | 30 | Edad max de un veredicto del canario antes de re-probar |
 | `RASTRILLO_SHERLOCK_TIMEOUT` | 900 | Timeout global de Sherlock |
 | `RASTRILLO_SHERLOCK_SITE_TIMEOUT` | 60 | Timeout per-site de Sherlock |
 | `RASTRILLO_HOLEHE_TIMEOUT` | 600 | Timeout global de Holehe |

@@ -11,6 +11,8 @@ Modos:
   rastrillo list [--status STATUS]         lista las cuentas conocidas
   rastrillo report --format json|csv|pdf --out FILE
                                            genera el informe completo a fichero
+  rastrillo canario URL|HOST [--user U]    (debug) ¿este sitio sabe decir que un
+                                           usuario no existe? Vuelca la evidencia
   rastrillo run                            (debug) procesa la cola desde terminal
 
 INVARIANTE: el modo CLI **NO** ejecuta acciones destructivas headless.
@@ -163,6 +165,78 @@ def cmd_report(args):
     return 0
 
 
+# ── canario: debug del canario a nivel de sitio ─────────────────────────────
+def cmd_canario(args):
+    """Corre el canario contra UN sitio y vuelca la evidencia.
+
+    Es el subcomando con el que se comprueba a mano si el mecanismo sirve
+    contra un sitio concreto (cavalier.hudsonrock.com, periscope.tv, baby.ru,
+    forum.velomania.ru…). NO escribe en la DB ni en la caché de veredictos:
+    solo hace las 2 peticiones y enseña qué devolvieron.
+    """
+    from rastrillo import canario
+
+    objetivo = args.target.strip()
+    ident = (args.user or "").strip()
+
+    if "://" in objetivo or "/" in objetivo or "?" in objetivo:
+        url = objetivo if "://" in objetivo else f"https://{objetivo}"
+        if not ident:
+            # Sin --user tomamos el último segmento del path como
+            # identificador: `https://www.periscope.tv/je7remy` es el formato
+            # en el que llegan los hits de sherlock.
+            import urllib.parse
+            ruta = urllib.parse.urlsplit(url).path.rstrip("/")
+            ident = ruta.rsplit("/", 1)[-1] if "/" in ruta else ""
+            if not ident:
+                print("error: no pude deducir el identificador de la URL; "
+                      "pásalo con --user", file=sys.stderr)
+                return 2
+    else:
+        # Host pelado: montamos la plantilla más común, https://host/<usuario>.
+        ident = ident or "usuario-de-prueba"
+        url = f"https://{objetivo.lstrip('/')}/{ident}"
+
+    tokens = args.token or None
+    if tokens:
+        malos = [t for t in tokens if not canario.token_plausible(t)]
+        if malos:
+            print(f"error: tokens no plausibles (solo minúsculas y dígitos, "
+                  f"4-32 chars): {malos}", file=sys.stderr)
+            return 2
+        if len(tokens) != 2:
+            print("error: el canario usa exactamente 2 tokens", file=sys.stderr)
+            return 2
+
+    print(f"Canario sobre {url}")
+    print(f"  identificador que sustituyo: {ident!r}")
+    res = canario.analizar_sitio(url, ident, tokens=tokens)
+    ev = res.get("evidencia") or {}
+    print(f"  usernames falsos: {', '.join(res.get('tokens') or []) or '-'}")
+    print()
+    for s in ev.get("sondas") or []:
+        print(f"  → {s.get('url')}")
+        if s.get("error"):
+            print(f"      ERROR: {s['error']}")
+            continue
+        print(f"      status={s.get('status')}  bytes={s.get('bytes')}")
+        marc = s.get("marcadores") or []
+        print(f"      marcadores de 'no existe': "
+              f"{', '.join(marc[:5]) if marc else '(ninguno)'}")
+        if s.get("final_url") and s["final_url"] != s.get("url"):
+            print(f"      redirigió a: {s['final_url']}")
+    print()
+    sim = ev.get("similitud")
+    print(f"  similitud entre los dos cuerpos: "
+          f"{f'{sim:.1%}' if sim is not None else '(no calculada)'} "
+          f"(umbral {canario.UMBRAL_SIMILITUD:.0%})")
+    print(f"  VEREDICTO: {res.get('veredicto')}")
+    print(f"  porque: {ev.get('motivo')}")
+    print()
+    print("  (modo debug: no se ha tocado la DB ni la caché de veredictos)")
+    return 0
+
+
 # ── run: debug helper que ya existía ────────────────────────────────────────
 def cmd_run(_args):
     """Procesa la cola desde terminal (sin abrir UI). Útil para debug.
@@ -210,6 +284,18 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--out", required=True,
         help="ruta del fichero de salida (se crean los directorios padres)")
     sr.set_defaults(func=cmd_report)
+
+    sc2 = sub.add_parser("canario",
+        help="(debug) comprueba si un sitio sabe decir que un usuario no existe")
+    sc2.add_argument("target",
+        help="URL del hit (https://sitio.com/u/usuario) o host pelado (sitio.com)")
+    sc2.add_argument("--user",
+        help="identificador a sustituir por los falsos; si das una URL se "
+             "deduce del último segmento del path")
+    sc2.add_argument("--token", action="append", default=[],
+        help="(opcional) fija los usernames falsos en vez de generarlos; "
+             "repite la opción, exactamente 2")
+    sc2.set_defaults(func=cmd_canario)
 
     srun = sub.add_parser("run",
         help="(debug) procesa la cola desde terminal sin abrir UI")

@@ -8,6 +8,77 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- **Canario a nivel de sitio** (Paso 2B, `rastrillo/canario.py`). El paso 2A
+  redujo falsos positivos mirando el username y la URL, pero no puede ver lo
+  que el sitio *contesta*: un escaneo real con un username distintivo devolvió
+  9 cuentas, todas en `high`, y varias no eran cuentas (HudsonRock responde a
+  una consulta de exposición de credenciales, no a un perfil; Periscope cerró
+  en marzo de 2021). El canario pregunta al sitio por **dos usernames falsos** y
+  compara **los dos canarios entre sí**:
+  - ambos 200, cuerpos casi idénticos (`difflib`, umbral 95 % sobre texto
+    normalizado) y sin marcadores de "no existe" → `indiscriminado`: el sitio
+    responde lo mismo a cualquiera, así que ningún hit suyo tiene valor
+    probatorio. Sus filas **heurísticas** (sherlock, maigret) **bajan a `low`**
+    con el motivo `canario_indiscriminado`, y "Descartar dudosas" las recoge
+    sin cambios en su lógica. Las de confianza **política** (holehe `high`,
+    hibp `medium`) reciben el motivo pero conservan el tramo: misma línea que
+    trazó el paso 2A —la señal ajusta estimaciones, nunca políticas— y además
+    holehe ni siquiera consulta la página de perfil, así que el veredicto no
+    es evidencia sobre esa fila.
+  - alguno 4xx, o marcador de "usuario no encontrado" en el cuerpo (los 6
+    idiomas del proyecto) → `discrimina`: el hit se respeta. **Nunca sube la
+    confianza**, solo anota el motivo.
+  - red caída, timeout o URL no construible → `indeterminado`: confianza
+    intacta y **no se cachea**, para reintentar en el próximo escaneo.
+
+  Comparar canarios entre sí y no contra el perfil real tiene tres
+  consecuencias: el veredicto es del **sitio**, no del identificador, así que
+  se cachea en `~/.rastrillo/canario.json` con TTL
+  (`RASTRILLO_CANARIO_MAX_AGE_DAYS`, default 30) y los escaneos posteriores
+  cuestan **cero peticiones**; nunca se pide la URL del perfil real, así que no
+  le anunciamos a un sitio ajeno que alguien mira ese username; y el chequeo de
+  marcadores evita el falso veredicto en los sitios que devuelven 200 con un
+  mensaje de error.
+
+  Coste: **exactamente 2 peticiones por sitio no cacheado**, no por fila. Solo
+  hits con `url`, lo que excluye estructuralmente holehe y hibp. Guarda
+  anti-SSRF de `resolver._is_safe_url`, throttle por dominio con
+  `RASTRILLO_PROBE_DELAY` y pool acotado con `RASTRILLO_RESOLVER_WORKERS` (sin
+  variables nuevas). Corre en `jobs.scan_async` entre el discovery y el
+  auto-resolver. Cero dependencias nuevas.
+
+- **`rastrillo canario URL|HOST [--user U]`** — subcomando de debug que corre
+  el canario contra un solo sitio y vuelca la evidencia (status de cada falso,
+  bytes, marcadores encontrados, similitud, veredicto y por qué) **sin tocar la
+  DB ni la caché de veredictos**. Es con lo que se valida el mecanismo a mano.
+
+### Fixed
+
+- **`@`, `~` y `#` faltaban en `_SEPARADORES_URL`.** La fila de TikTok
+  (`tiktok.com/@usuario`) no obtenía el motivo "coincide en la ruta" porque el
+  `@` previo no validaba como frontera de segmento, y el bump se perdía. Con un
+  username corto eso cuesta un tramo entero. De paso, `_identificador_en_url`
+  ahora también mira el **fragmento** (`urlsplit` lo saca del path, así que se
+  perdía entero) con las mismas reglas de frontera: hay SPAs que publican el
+  perfil en `/#/user/nombre`.
+
+- **El triage enseñaba una URL que no era la del hit.** Freelancer aparecía
+  como `.../users/settings.php#AccountSettings` y Steam como
+  `help.steampowered.com/.../HelpDeleteAccount`, ambas bajo un enlace
+  etiquetado "perfil". Eran URLs de **borrado**: el resolver las escribía
+  encima de `profile_url` en los **cuatro** caminos que tocan esa columna
+  (`jobs._resolve_one`, `server._apply_resolution`, `process-all-auto` y
+  `engine.run_account` por la rama sin receta). Como los chips de motivo se
+  calculan sobre la URL del hit, a ojo parecía que el chip mentía. Ahora los
+  cuatro pasan por `db.backfill_profile_url()`, que solo rellena **si está
+  vacía** —el caso de holehe y hibp, que nunca traen URL—, y la de borrado
+  viaja como `deletion_url` en `/api/accounts` (computada desde `action_meta`)
+  con su propio enlace, "cómo darse de baja". Sin cambios de esquema. En
+  `engine` el arreglo además refuerza la verificación anti-falso-`deleted`:
+  `_confirm_and_seal` revisita el perfil real en vez de la página de baja.
+
 ### Changed
 
 - **Menos falsos positivos en el discovery, sin una sola petición nueva**

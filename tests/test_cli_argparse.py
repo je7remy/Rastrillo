@@ -27,14 +27,29 @@ class TestCLIParser(IsolatedTestCase):
         self.cli = cli
 
     def test_subcomandos_disponibles(self):
-        """Los 4 subcomandos del plan están registrados."""
+        """Los subcomandos registrados. `canario` se sumó en el paso 2B como
+        helper de debug del canario a nivel de sitio."""
         p = self.cli.build_parser()
         # `add_subparsers(dest='cmd')` añade un único action al final.
         sub_actions = [a for a in p._actions
                        if a.__class__.__name__ == "_SubParsersAction"]
         self.assertEqual(len(sub_actions), 1)
         choices = set(sub_actions[0].choices.keys())
-        self.assertEqual(choices, {"scan", "list", "report", "run"})
+        self.assertEqual(choices, {"scan", "list", "report", "run", "canario"})
+
+    def test_canario_parsea_target_user_y_tokens(self):
+        p = self.cli.build_parser()
+        args = p.parse_args(["canario", "https://baby.ru/u/je7remy",
+                             "--user", "je7remy",
+                             "--token", "abcdefghij", "--token", "klmnopqrst"])
+        self.assertEqual(args.target, "https://baby.ru/u/je7remy")
+        self.assertEqual(args.user, "je7remy")
+        self.assertEqual(args.token, ["abcdefghij", "klmnopqrst"])
+        # Host pelado y sin opciones: también vale.
+        args = p.parse_args(["canario", "baby.ru"])
+        self.assertEqual(args.target, "baby.ru")
+        self.assertIsNone(args.user)
+        self.assertEqual(args.token, [])
 
     def test_report_parsea_format_y_out(self):
         p = self.cli.build_parser()

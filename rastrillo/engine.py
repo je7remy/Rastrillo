@@ -185,8 +185,13 @@ class Engine:
             account_id,
             action_meta=json.dumps(res.to_meta(), ensure_ascii=False),
         )
-        if res.url:
-            db.update_account(account_id, profile_url=res.url)
+        # La URL de borrado NO pisa `profile_url` (ver `db.backfill_profile_url`):
+        # esa columna guarda la URL del HIT, que es lo que enseña el triage y
+        # sobre lo que se calcularon los motivos de confianza. Era el cuarto —y
+        # último— camino que la sobrescribía. El bucle de IA no depende de ella
+        # (usa `res.url` directo), y `_confirm_and_seal` sale ganando: revisita
+        # el perfil real en vez de la página de baja.
+        db.backfill_profile_url(account_id, res.url)
 
         if res.kind == "semi_auto":
             db.set_status(account_id, "semi_auto",

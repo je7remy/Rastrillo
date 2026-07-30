@@ -127,12 +127,18 @@ def _holehe_confidence() -> str:
     return "high"
 
 
-# Separadores que delimitan un segmento dentro de un path o un query string.
-# Un match del identificador solo cuenta si a cada lado hay uno de estos (o el
-# extremo de la cadena): sin esta frontera, un substring suelto reproduce el
-# mismo falso positivo que arreglamos en el host, solo movido de componente
-# (`mar` casaría en `/marca-noticias/123`).
-_SEPARADORES_URL = "/-_.=?&"
+# Separadores que delimitan un segmento dentro de un path, un query string o un
+# fragmento. Un match del identificador solo cuenta si a cada lado hay uno de
+# estos (o el extremo de la cadena): sin esta frontera, un substring suelto
+# reproduce el mismo falso positivo que arreglamos en el host, solo movido de
+# componente (`mar` casaría en `/marca-noticias/123`).
+#
+# `@ ~ #` salieron de un escaneo real: TikTok publica el perfil como
+# `tiktok.com/@usuario` y sin `@` el carácter previo no validaba como frontera,
+# así que el bump se perdía. `~usuario` es la convención clásica de los
+# hostings personales, y `#` delimita el fragmento (ver `_identificador_en_url`,
+# que sí lo mira: hay SPAs que ponen el usuario ahí).
+_SEPARADORES_URL = "/-_.=?&@~#"
 
 
 def _match_con_frontera(needle: str, haystack: str) -> bool:
@@ -164,10 +170,11 @@ def _identificador_en_url(identifier: str, url):
     username `ana` subía de tramo por `https://banana.com/u/xyz`.
 
     Solo cuentan dos sitios:
-      (a) el path o el query string, como SEGMENTO COMPLETO — `/u/jeremy`,
-          `/perfil?user=jeremy`, `/jeremy-perfil`. Un substring a media
-          palabra no vale: `mar` en `/marca-noticias/123` es el mismo bug de
-          `banana.com`, solo movido de componente. Ver `_match_con_frontera`.
+      (a) el path, el query string o el fragmento, como SEGMENTO COMPLETO —
+          `/u/jeremy`, `/perfil?user=jeremy`, `/jeremy-perfil`, `/@jeremy`,
+          `/#/user/jeremy`. Un substring a media palabra no vale: `mar` en
+          `/marca-noticias/123` es el mismo bug de `banana.com`, solo movido
+          de componente. Ver `_match_con_frontera`.
       (b) la etiqueta MÁS A LA IZQUIERDA del host, con igualdad exacta —
           `jeremy.tumblr.com`, `jeremy.wordpress.com`. Es señal legítima de
           los sitios que dan subdominio por usuario y no queremos perderla.
@@ -185,9 +192,13 @@ def _identificador_en_url(identifier: str, url):
     except ValueError:
         return None
 
-    # (a) path + query, como segmento. El '?' que los une hace de frontera
-    # tanto si hay query como si no.
-    if _match_con_frontera(u, f"{parts.path or ''}?{parts.query or ''}".lower()):
+    # (a) path + query + fragmento, como segmento. El '?' y el '#' que los unen
+    # hacen de frontera tanto si hay query/fragmento como si no. El fragmento
+    # entra porque `urlsplit` lo saca del path y hay perfiles que viven ahí
+    # (`site.com/#/user/jeremy`); sin él, esa señal se perdía entera.
+    haystack = (f"{parts.path or ''}?{parts.query or ''}"
+                f"#{parts.fragment or ''}").lower()
+    if _match_con_frontera(u, haystack):
         return "path"
 
     # (b) etiqueta izquierda del host (quitando credenciales y puerto)

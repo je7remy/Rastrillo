@@ -313,6 +313,29 @@ def update_account(account_id, **fields):
         con.execute(f"UPDATE accounts SET {sets} WHERE id=?", (*fields.values(), account_id))
 
 
+def backfill_profile_url(account_id, url) -> bool:
+    """Rellena `profile_url` SOLO si la fila todavía no tiene ninguna.
+
+    `profile_url` es la URL DEL HIT: la que produjo el descubrimiento y sobre
+    la que `discovery._identificador_en_url` calculó los motivos de confianza.
+    El triage la enseña etiquetada como "perfil", así que pisarla con la URL de
+    BORRADO que devuelve el resolver hacía que los chips ("coincide en la
+    ruta") describieran una URL distinta de la mostrada — a ojo, parecía que
+    el chip mentía. La URL de borrado ya viaja en `action_meta.url` y la UI la
+    saca de ahí como enlace aparte.
+
+    El backfill sí es útil: holehe y hibp nunca traen URL, y para esas filas la
+    del resolver es la única que hay. Devuelve True si escribió.
+    """
+    if not url:
+        return False
+    row = get_account(account_id)
+    if row is not None and (row["profile_url"] or "").strip():
+        return False
+    update_account(account_id, profile_url=url)
+    return True
+
+
 def set_status(account_id, status, message=None):
     update_account(account_id, status=status, last_message=message)
     log(account_id, "info", f"status -> {status}" + (f": {message}" if message else ""))

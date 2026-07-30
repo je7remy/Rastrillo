@@ -156,6 +156,11 @@ def _resolve_one(row: dict) -> bool:
     Importante: `resolver.resolve()` ya respeta el caché en
     ~/.rastrillo/discovered.json — si el host ya está cacheado, no hace red.
     Así no re-fetcheamos lo conocido (parte del Tier 2.2).
+
+    `profile_url` NO se pisa si ya trae la URL del hit: el triage la enseña
+    como "perfil" y los chips de confianza se calcularon sobre ella. La URL de
+    borrado del resolver ya viaja en `action_meta.url`, que es de donde la
+    saca la UI (ver `_backfill_profile_url`).
     """
     from . import resolver as _resolver
     host = row["source_site"] or row["platform"]
@@ -169,8 +174,7 @@ def _resolve_one(row: dict) -> bool:
             row["id"],
             action_meta=json.dumps(res.to_meta(), ensure_ascii=False),
         )
-        if res.url:
-            db.update_account(row["id"], profile_url=res.url)
+        db.backfill_profile_url(row["id"], res.url)
         return True
     except Exception as e:
         log.warning("auto-resolver guardado fallo acc=%s: %s", row["id"], e)
@@ -227,6 +231,21 @@ def scan_async(usernames, emails) -> None:
             _scan_status["resolved"] = 0
         try:
             summary = discover(usernames or [], emails or [])
+            # Canario a nivel de sitio: va DESPUÉS del discovery (necesita las
+            # filas en la DB) y ANTES del auto-resolver, por dos razones —
+            # `profile_url` todavía es la URL del hit, que es la plantilla que
+            # el canario necesita; y así el auto-resolver no gasta peticiones
+            # planificando el borrado de sitios recién invalidados.
+            # No aborta el escaneo: un fallo aquí solo deja la confianza como
+            # estaba (ver canario.run_canario).
+            with _lock:
+                _scan_status["phase"] = "canario"
+            try:
+                from .canario import run_canario
+                summary["canario"] = run_canario()
+            except Exception as e:
+                log.exception("canario falló; sigo sin él")
+                summary["canario"] = {"error": str(e)}
             with _lock:
                 _scan_status["last"] = summary
                 _scan_status["phase"] = "resolving"
