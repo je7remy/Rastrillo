@@ -8,6 +8,60 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **Menos falsos positivos en el discovery, sin una sola petición nueva**
+  (Paso 2A). Tres cosas:
+  - El bump de confianza por URL era `identifier.lower() in url.lower()`
+    sobre la URL completa, así que casaba dentro del dominio: el username
+    `ana` subía de tramo por `https://banana.com/u/xyz`. Ahora
+    `_identificador_en_url()` parsea con `urllib.parse.urlsplit` y solo
+    concede señal si el identificador aparece **en el path o el query string
+    como segmento completo**, o **como etiqueta más a la izquierda del host
+    con igualdad exacta** (`jeremy.tumblr.com` — señal legítima que no
+    queríamos perder). La frontera de segmento la impone
+    `_match_con_frontera()`: separador (`/ - _ . = ? &`) o extremo de cadena a
+    cada lado, recorriendo todas las apariciones. Sin ella el bug reaparecía
+    movido de componente (`mar` casaba en `/marca-noticias/123`), y los
+    identificadores de 1-2 caracteres bumpeaban por casualidad. La escala base
+    (longitud / distintividad) no se tocó. Efecto buscado: hallazgos que antes
+    salían `medium` ahora salen `low`, así que "Descartar low" atrapa más. En
+    un lote de ejemplo con 20 hits realistas, 10 filas bajan de tramo
+    (9 `medium→low`, 1 `high→medium`) y las candidatas a `discard-low` pasan
+    de 2 a 11.
+  - **Corroboración entre fuentes.** Un `source_site` que sale de dos tipos
+    de identificador distintos (un email vía holehe/hibp + un username vía
+    sherlock/maigret) son dos caminos independientes al mismo sitio: sube un
+    tramo a la fila heurística. Se calcula en `_corroborar_entre_fuentes()`,
+    un pase final de `discover()` sin red, porque la DB es el único sitio
+    donde existe el conjunto completo y ya deduplicado. **No fusiona filas**:
+    la unicidad sigue siendo `(source_site, identifier)`. Sherlock+maigret,
+    que sí colapsan en una fila, quedan anotados en el `upsert` como señal
+    **débil** que no mueve el tramo (catálogos de sitios que se solapan, así
+    que coincidir no es independiente). Nada pasa de `high`, y las fuentes de
+    confianza política (holehe `high`, hibp `medium`, manual `high`) reciben
+    el motivo pero nunca cambian de tramo.
+  - **HIBP solo corrobora cuando la brecha es de un sitio real.** Las brechas
+    con `Domain` vacío ya se descartaban (es el caso de los volcados agregados
+    tipo "Collection #1": no hay sitio al que ir a borrar), y ahora se registra
+    en el log por qué. Las que sí traen dominio pero llevan `IsSpamList`,
+    `IsFabricated` o `IsVerified=false` entran al discovery marcadas con el
+    motivo `hibp_no_sitio` y quedan **excluidas de la corroboración**: no
+    corroboran ni son corroboradas. Siguen visibles para que las revises —
+    el filtro es de la señal, no del hallazgo.
+  - **La confianza deja de ser una caja negra.** Columna nueva
+    `accounts.confidence_reasons` (JSON `[{code, desc}]`, serializada igual
+    que `action_meta`, migración idempotente en `db.init()`); `confidence`
+    se queda como estaba. `GET /api/accounts` la devuelve ya parseada y la
+    fila del dashboard pinta chips cortos (`.chip-xs`) con la descripción en
+    el `title` — texto plano, sin HTML. Códigos: `tramo_distintivo`,
+    `tramo_corto`, `tramo_muy_corto`, `id_vacio`, `bump_path`,
+    `bump_subdominio`, `corrob_misma_fila`, `corrob_cruzada`,
+    `fuente_holehe`, `fuente_hibp`, `fuente_manual`.
+
+  Cero dependencias nuevas (`urllib.parse` es stdlib) y cero red: la
+  verificación activa (canario, soft-404) es el paso 2B.
+
 ### Added
 
 - **Eliminación programada con cuenta regresiva** (FASE 4): cuando una
@@ -27,6 +81,25 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
   de dominios ya analizados (`GET /api/domain/history`) y recarga del
   último informe guardado al cargar la página (`GET /api/domain/report`),
   sin volver a la red.
+- **Histórico de dominios colapsable y limpiable.** Los informes guardados
+  se pintan como lista de tarjetas colapsables (la más reciente expandida,
+  el resto plegadas) en lugar del desplegable anterior. La cabecera de cada
+  tarjeta, visible también plegada, muestra dominio, fecha y un resumen de
+  una línea (nº de registros DNS · nº de correlaciones · registrador). El
+  toggle es un `<button>` real con `aria-expanded`/`aria-controls`, así que
+  el teclado funciona sin JS extra; el cuerpo se oculta con el atributo
+  `hidden`. Controles globales "Colapsar todo" / "Expandir todo" y
+  persistencia del estado plegado por dominio en `localStorage`
+  (`rastrillo.domain.collapsed`, con purga de dominios ya borrados).
+  Nuevos endpoints `POST /api/domain/report/delete` (body `{domain}`; 400
+  dominio inválido, 404 accionable si no está en el histórico) y
+  `POST /api/domain/history/clear` (→ `{ok, deleted}`), respaldados por
+  `db.delete_domain_report()` y `db.clear_domain_reports()`. El clear hace
+  `snapshot_db()` antes de borrar, igual que `clear_accounts`. Ambos van por
+  **POST y no DELETE**: el `auth_middleware` solo exige token en POST y en
+  los GET de `/api/*`, así que un DELETE entraría sin token. En la UI, cada
+  borrado pasa por el modal de confirmación (el de "Limpiar historial" dice
+  cuántos informes se van a borrar). Cero dependencias nuevas.
 
 ### Fixed
 

@@ -26,6 +26,25 @@ const TONE={
 const CONF_TONE={ high:"success", medium:"warn", low:"danger" };
 const CONF_LABEL={ high:"Confianza alta", medium:"Confianza media", low:"Confianza baja" };
 
+/* Etiqueta corta de cada motivo de confianza (los `code` que persiste
+ * discovery en accounts.confidence_reasons). La descripción larga que manda el
+ * server va en el `title` del chip. Un code desconocido se muestra tal cual:
+ * mejor un código crudo que un chip vacío. */
+const REASON_LABEL={
+  tramo_distintivo:"username distintivo",
+  tramo_corto:"username corto",
+  tramo_muy_corto:"username muy corto",
+  id_vacio:"sin identificador",
+  bump_path:"coincide en la ruta",
+  bump_subdominio:"coincide en subdominio",
+  corrob_misma_fila:"2 buscadores",
+  corrob_cruzada:"email + username",
+  fuente_holehe:"email confirmado",
+  fuente_hibp:"brecha de datos",
+  hibp_no_sitio:"volcado sin verificar",
+  fuente_manual:"añadida a mano",
+};
+
 /* Agrupación de estados por intención del usuario.
  *   triage = found sin confirmar dueño (de discovery, esperando triage)
  *   pending/action/done/kept/discarded son los otros apartados
@@ -79,6 +98,8 @@ const ICONS={
   filter:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18M6 12h12M10 20h4"/></svg>',
   sun:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>',
   moon:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
+  chevron:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
+  trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>',
 };
 const ic=n=>ICONS[n]||"";
 
@@ -282,8 +303,9 @@ function renderRow(a){
   }
   const msg=SHOW_MSG.has(a.status) && a.last_message
     ? `<div class="row-msg">${linkify(escapeHtml(a.last_message))}</div>` : "";
-  // Indicador de confianza: solo lo mostramos cuando NO está confirmada como
-  // propia, porque es ahí donde sirve (filtrar falsos positivos).
+  // Motivos de la confianza: mismo criterio que el badge (solo mientras no
+  // esté confirmada como propia, que es cuando sirven para el triage).
+  // Texto plano en el title: el render escapa todo, no metemos HTML ahí.
   const conf = a.confidence && !a.owned
     ? `<span class="badge ${CONF_TONE[a.confidence]||""}" title="${escapeAttr(CONF_LABEL[a.confidence]||"")} · source=${escapeAttr(a.source||"")}">${escapeHtml(a.confidence)}</span>`
     : "";
@@ -296,6 +318,7 @@ function renderRow(a){
     <div class="row-main">
       <div class="row-title">${escapeHtml(a.display_name||a.platform)}${ownedMark}</div>
       <div class="row-meta">${id}${site}${link}${sent}${deadlineMeta}</div>
+      ${reasonChips(a)}
     </div>
     ${conf}
     ${badgeFor(a)}
@@ -303,6 +326,20 @@ function renderRow(a){
     ${msg}
     ${deadlineBar}
   </div>`;
+}
+
+function reasonChips(a){
+  if(a.owned) return "";
+  const rs = a.confidence_reasons || [];
+  if(!rs.length) return "";
+  const chips = rs.map(r=>{
+    const code = (r && r.code) ? String(r.code) : "";
+    const label = REASON_LABEL[code] || code;
+    if(!label) return "";
+    const tip = (r && r.desc) ? String(r.desc) : label;
+    return `<span class="chip chip-xs" title="${escapeAttr(tip)}">${escapeHtml(label)}</span>`;
+  }).join("");
+  return chips ? `<div class="row-reasons">${chips}</div>` : "";
 }
 
 /* ── Triage rápido ─────────────────────────────────── */
@@ -968,7 +1005,9 @@ function domList(label, arr){
   const items = arr.map(x=>`<li>${escapeHtml(String(x))}</li>`).join("");
   return `<div class="dom-block"><div class="dom-block-h">${escapeHtml(label)}</div><ul class="dom-ul">${items}</ul></div>`;
 }
-function renderDomainReport(rep){
+/* Cuerpo del informe (WHOIS + DNS + correlaciones). La cabecera con el
+ * dominio vive ahora en la tarjeta colapsable, no aquí. */
+function renderDomainBody(rep){
   if(!rep) return "";
   const w = rep.whois||{}, d = rep.dns||{}, cor = rep.correlations||[];
   /* WHOIS */
@@ -1007,20 +1046,45 @@ function renderDomainReport(rep){
   const errs = (rep.errors&&rep.errors.length)
     ? `<div class="row-msg" style="color:var(--warn)">${rep.errors.map(e=>escapeHtml(e.source+": "+e.error)).join(" · ")}</div>`
     : "";
-  return `<div class="dom-report">
-    <div class="dom-report-h">${escapeHtml(rep.domain||"")}</div>
-    ${whois}${dns}${cors}${errs}
-  </div>`;
+  return `<div class="dom-report">${whois}${dns}${cors}${errs}</div>`;
 }
 /* ── Inteligencia de dominio: histórico (persistido en domain_reports) ──────
  * El backend persiste un informe por dominio y expone /history y /report. Aquí
- * los consumimos: al cargar la página poblamos el desplegable y mostramos el
- * último informe guardado SIN re-analizar; al elegir un dominio recargamos su
- * informe guardado (tampoco pega a la red). */
+ * los consumimos y los pintamos como una lista de tarjetas COLAPSABLES: la más
+ * reciente abierta y el resto plegadas, para que la sección no crezca sin
+ * límite a base de análisis acumulados. Nada de esto vuelve a la red a los
+ * sitios: solo lee lo ya guardado. */
+
+/* Informes cargados en la vista actual (recientes primero). Lo usamos para
+ * saber cuántos hay sin volver a preguntar al server (p.ej. en la
+ * confirmación de "Limpiar historial"). */
+let DOM_REPORTS = [];
+
 function fmtDomDate(ts){
   if(!ts) return "";
   try{ return new Date(ts*1000).toLocaleDateString(); }catch(e){ return ""; }
 }
+
+/* Estado colapsado por dominio, persistido entre recargas. Guardamos un mapa
+ * {dominio: true|false}; un dominio AUSENTE del mapa usa el default (el más
+ * reciente abierto, el resto plegados). localStorage puede fallar (modo
+ * privado, cuota): degradamos a "sin memoria" sin romper la vista. */
+const DOM_COLLAPSE_KEY = "rastrillo.domain.collapsed";
+function domCollapseRead(){
+  try{
+    const v = JSON.parse(localStorage.getItem(DOM_COLLAPSE_KEY) || "{}");
+    return (v && typeof v === "object") ? v : {};
+  }catch(e){ return {}; }
+}
+function domCollapseWrite(state){
+  try{ localStorage.setItem(DOM_COLLAPSE_KEY, JSON.stringify(state)); }catch(e){}
+}
+function domCollapseSet(domain, collapsed){
+  const st = domCollapseRead();
+  st[domain] = !!collapsed;
+  domCollapseWrite(st);
+}
+
 async function fetchDomainHistory(){
   try{
     const r=await getAPI("/api/domain/history");
@@ -1028,36 +1092,161 @@ async function fetchDomainHistory(){
     return (await r.json()).domains || [];
   }catch(e){ return []; }
 }
-function populateDomainHistory(domains, selected){
-  const wrap=$("dom-history-wrap"), sel=$("dom-history");
-  if(!domains || !domains.length){ wrap.style.display="none"; sel.innerHTML=""; return; }
-  sel.innerHTML=domains.map(d=>
-    `<option value="${escapeAttr(d.domain)}">${escapeHtml(d.domain)} · ${escapeHtml(fmtDomDate(d.created_at))}</option>`
-  ).join("");
-  if(selected) sel.value=selected;
-  wrap.style.display="";
-}
-/* Carga un informe YA guardado (no re-analiza). Devuelve true si lo pinto. */
-async function loadDomainReport(domain){
-  if(!domain) return false;
+
+/* Trae UN informe ya guardado (no re-analiza). Devuelve el objeto o null. */
+async function fetchDomainReport(domain){
+  if(!domain) return null;
   try{
     const r=await getAPI(`/api/domain/report?domain=${encodeURIComponent(domain)}`);
-    if(!r.ok) return false;
+    if(!r.ok) return null;
     const data=await r.json();
-    if(data && data.report){
-      $("dom-result").innerHTML=renderDomainReport(data.report);
-      $("dom-input").value=domain;
-      $("dom-status").textContent="Informe guardado"
-        + (data.created_at?` · ${fmtDomDate(data.created_at)}`:"");
-      return true;
-    }
-  }catch(e){ /* conveniencia, no critico: si falla, el usuario re-analiza */ }
-  return false;
+    return (data && data.report) ? data.report : null;
+  }catch(e){ return null; }   // conveniencia, no crítico: el usuario re-analiza
 }
-async function initDomainHistory(){
-  const domains=await fetchDomainHistory();
-  populateDomainHistory(domains, domains.length ? domains[0].domain : null);
-  if(domains.length){ await loadDomainReport(domains[0].domain); }  // ultimo guardado
+
+/* Resumen de una línea para la cabecera (visible también plegada). */
+function domSummaryLine(rep){
+  const d = rep.dns||{};
+  const n = (d.a||[]).length + (d.mx||[]).length + (d.ns||[]).length + (d.txt||[]).length;
+  const c = (rep.correlations||[]).length;
+  const parts = [
+    `${n} ${n===1?"registro":"registros"} DNS`,
+    `${c} ${c===1?"correlación":"correlaciones"}`,
+  ];
+  if(rep.registrar) parts.push(rep.registrar);
+  return parts.join(" · ");
+}
+
+/* Una tarjeta colapsable. El toggle es un <button> de verdad para que el
+ * teclado funcione sin JS extra (Enter/Espacio) y lleva aria-expanded +
+ * aria-controls; el cuerpo se oculta con el atributo `hidden`. */
+function renderDomainCard(entry, idx, collapsed){
+  const rep = entry.report, dom = entry.domain;
+  const bodyId = `dom-body-${idx}`;
+  return `<div class="dom-card" data-domain="${escapeAttr(dom)}">
+    <div class="dom-card-h">
+      <button class="dom-toggle" type="button" data-act="toggle"
+              aria-expanded="${collapsed?"false":"true"}" aria-controls="${bodyId}">
+        <span class="dom-chev" aria-hidden="true">${ic("chevron")}</span>
+        <span class="dom-card-dom">${escapeHtml(dom)}</span>
+        <span class="dom-card-date">${escapeHtml(fmtDomDate(entry.created_at))}</span>
+        <span class="dom-card-sum">${escapeHtml(domSummaryLine(rep))}</span>
+      </button>
+      <button class="btn btn-sm btn-ghost dom-del" type="button" data-act="del"
+              title="Eliminar este informe del histórico"
+              aria-label="Eliminar el informe de ${escapeAttr(dom)}">${ic("trash")}</button>
+    </div>
+    <div class="dom-card-b" id="${bodyId}"${collapsed?" hidden":""}>${renderDomainBody(rep)}</div>
+  </div>`;
+}
+
+/* Estado vacío de la sección: sin informes (nunca analizado nada, o justo
+ * después de "Limpiar historial") explicamos qué va aquí en vez de dejar un
+ * hueco. Mismo patrón que emptyState() de la lista de cuentas. */
+function emptyDomainHistory(){
+  return `<div class="empty empty-sm">
+    <div class="empty-icon">${ic("inbox")}</div>
+    <div class="empty-title">Todavía no has analizado ningún dominio</div>
+    <div class="empty-body">Escribe un dominio tuyo (o uno que tengas permiso
+      de auditar) arriba y pulsa <b>Analizar</b>. El informe se guarda aquí y
+      podrás volver a consultarlo sin repetir las consultas.</div>
+  </div>`;
+}
+
+/* Pinta la lista completa. `expand` (opcional) fuerza abierto ese dominio
+ * (lo usamos tras analizar: lo recién pedido se ve sin un clic extra). */
+function renderDomainHistory(entries, expand){
+  DOM_REPORTS = entries || [];
+  const wrap=$("dom-history-wrap"), list=$("dom-history-list");
+  const tools=$("dom-history-tools");
+  if(!DOM_REPORTS.length){
+    // La sección se queda visible con el estado vacío; los controles globales
+    // (colapsar / expandir / limpiar) no tienen sobre qué actuar, así que fuera.
+    list.innerHTML=emptyDomainHistory();
+    $("dom-history-count").textContent="Informes guardados";
+    tools.style.display="none";
+    wrap.style.display="";
+    return;
+  }
+  tools.style.display="";
+  const st = domCollapseRead();
+  const fresh = {};   // reconstruimos el mapa: purga dominios ya borrados
+  const html = DOM_REPORTS.map((e, i)=>{
+    // Default: solo el más reciente abierto. La preferencia guardada manda,
+    // salvo que `expand` pida explícitamente abrir este.
+    let collapsed = (e.domain in st) ? !!st[e.domain] : (i !== 0);
+    if(expand && e.domain === expand) collapsed = false;
+    fresh[e.domain] = collapsed;
+    return renderDomainCard(e, i, collapsed);
+  }).join("");
+  domCollapseWrite(fresh);
+  list.innerHTML = html;
+  $("dom-history-count").textContent =
+    `Informes guardados · ${DOM_REPORTS.length}`;
+  wrap.style.display="";
+}
+
+/* Recarga histórico + informes y repinta. Los informes son locales (SQLite) y
+ * pequeños: los pedimos en paralelo y montamos la vista de una vez. */
+async function refreshDomainHistory(expand){
+  const hist = await fetchDomainHistory();
+  const reps = await Promise.all(hist.map(h=>fetchDomainReport(h.domain)));
+  const entries = [];
+  hist.forEach((h, i)=>{
+    if(reps[i]) entries.push({domain:h.domain, created_at:h.created_at, report:reps[i]});
+  });
+  renderDomainHistory(entries, expand);
+}
+
+/* Abre/cierra una tarjeta. `force` (true=abrir, false=cerrar) para los
+ * controles globales; sin él, alterna. */
+function toggleDomCard(card, force){
+  const btn=card.querySelector(".dom-toggle"), body=card.querySelector(".dom-card-b");
+  if(!btn || !body) return;
+  const open = (force===undefined) ? body.hidden : !!force;
+  body.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  domCollapseSet(card.dataset.domain, !open);
+}
+function setAllDomCards(open){
+  document.querySelectorAll("#dom-history-list .dom-card")
+    .forEach(card=>toggleDomCard(card, open));
+}
+
+function askDeleteDomainReport(domain){
+  showConfirm({
+    title:"Eliminar informe de dominio",
+    body:`Vas a borrar el informe guardado de ${domain}. Solo desaparece del `
+        +`histórico local: son datos públicos (WHOIS/DNS) y puedes volver a `
+        +`analizar el dominio cuando quieras.`,
+    danger:true, confirmLabel:"Eliminar",
+    onYes: async ()=>{
+      try{
+        await postJSON("/api/domain/report/delete", {domain});
+        toast("Informe eliminado");
+      }catch(e){ toast(e.message||"No pude eliminar el informe", 7000, "err"); }
+      await refreshDomainHistory();   // refresco sin recargar la página
+    },
+  });
+}
+
+function askClearDomainHistory(){
+  const n = DOM_REPORTS.length;
+  if(!n){ toast("No hay informes guardados", 3000); return; }
+  showConfirm({
+    title:"Limpiar histórico de dominios",
+    body:`Vas a borrar ${n} ${n===1?"informe":"informes"} de dominio. Antes se `
+        +`guarda una copia de la base de datos en ~/.rastrillo/backups/. No `
+        +`afecta a tus cuentas detectadas.`,
+    danger:true, confirmLabel:`Borrar ${n===1?"el informe":"los "+n+" informes"}`,
+    onYes: async ()=>{
+      try{
+        const r=await postJSON("/api/domain/history/clear", {});
+        toast(`Histórico limpio (${r.deleted||0})`);
+      }catch(e){ toast(e.message||"No pude limpiar el histórico", 7000, "err"); }
+      await refreshDomainHistory();
+    },
+  });
 }
 
 async function analyzeDomain(){
@@ -1069,10 +1258,10 @@ async function analyzeDomain(){
   st.classList.add("busy");
   try{
     const rep=await postJSON("/api/domain/analyze",{domain:raw});
-    $("dom-result").innerHTML=renderDomainReport(rep);
     st.textContent="Análisis completado";
-    // Refrescamos el histórico y dejamos seleccionado el dominio recién analizado.
-    populateDomainHistory(await fetchDomainHistory(), raw);
+    // El informe recién hecho ya está persistido: repintamos el histórico y
+    // dejamos su tarjeta abierta.
+    await refreshDomainHistory(rep.domain||raw);
   } catch(e){
     st.textContent="";
     toast(e.message||"No pude analizar el dominio", 7000, "err");
@@ -1084,8 +1273,20 @@ $("dom-btn").onclick=analyzeDomain;
 $("dom-input").addEventListener("keydown",(e)=>{
   if(e.key==="Enter"){ e.preventDefault(); analyzeDomain(); }
 });
-$("dom-history").onchange=function(){ loadDomainReport(this.value); };
-initDomainHistory();
+/* Delegación: las tarjetas se repintan enteras, así que un solo listener en el
+ * contenedor evita re-enganchar handlers en cada refresco. */
+$("dom-history-list").addEventListener("click",(e)=>{
+  const t=e.target.closest("[data-act]");
+  if(!t) return;
+  const card=t.closest(".dom-card");
+  if(!card) return;
+  if(t.dataset.act==="toggle") toggleDomCard(card);
+  else if(t.dataset.act==="del") askDeleteDomainReport(card.dataset.domain);
+});
+$("dom-collapse-all").onclick=()=>setAllDomCards(false);
+$("dom-expand-all").onclick=()=>setAllDomCards(true);
+$("dom-clear-btn").onclick=askClearDomainHistory;
+refreshDomainHistory();
 
 /* ── Toggle de tema ───────────────────────────────────────── */
 function applyTheme(theme, save){

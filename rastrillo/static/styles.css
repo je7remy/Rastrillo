@@ -123,6 +123,10 @@ button:focus-visible,
 .chip-dot.warn{background:var(--warn)}
 .chip-dot.off{background:var(--danger)}
 .chip-dot.pulse{animation:pulse 1.4s ease-in-out infinite}
+/* Variante mini: chips informativos dentro de una fila de cuenta (motivos de
+   confianza), donde los 28px del chip normal desmontan la fila. */
+.chip-xs{height:20px;padding:0 8px;font-size:11px;background:var(--surface-2)}
+.row-reasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
 .chip-toggle{border-style:dashed;cursor:pointer;color:var(--text-3)}
 .chip-toggle:hover{color:var(--text-2);border-color:var(--border-strong)}
 .chip-toggle.on{
@@ -375,6 +379,9 @@ button:focus-visible,
 .empty-icon svg{width:22px;height:22px}
 .empty-title{font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px}
 .empty-body{font-size:13px;max-width:380px;margin:0 auto;line-height:1.5}
+/* Variante compacta: estados vacíos DENTRO de una tarjeta (p.ej. el histórico
+   de Inteligencia de dominio), donde 56px de padding sobran. */
+.empty-sm{padding:28px 20px}
 .skeleton-row{
   display:grid;grid-template-columns:34px 1fr 80px;
   gap:14px;padding:14px 18px;
@@ -452,10 +459,41 @@ button:focus-visible,
 
 /* ── Domain Intelligence ────────────────────────────────── */
 .dom-result{margin-top:14px}
-.dom-report-h{
-  font-family:var(--font-mono);font-size:15px;font-weight:600;
-  color:var(--text);margin-bottom:10px;word-break:break-all;
+/* Histórico de informes: cabecera con los controles globales + lista de
+   tarjetas colapsables. */
+.dom-history{margin-top:16px}
+.dom-history-h{margin:0}
+.dom-card{
+  border:1px solid var(--border);border-radius:var(--r-md);
+  margin-bottom:10px;background:var(--surface);overflow:hidden;
 }
+.dom-card-h{display:flex;align-items:stretch;gap:6px;padding:4px 6px 4px 0}
+/* El toggle es un <button> real (foco y teclado nativos) disfrazado de fila. */
+.dom-toggle{
+  flex:1;min-width:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:none;border:0;padding:9px 4px 9px 10px;cursor:pointer;
+  font:inherit;color:var(--text);text-align:left;border-radius:var(--r-sm);
+}
+.dom-toggle:hover{background:var(--surface-2)}
+.dom-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.dom-chev{
+  display:inline-flex;flex:none;width:16px;height:16px;color:var(--text-2);
+  transition:transform .15s ease;
+}
+.dom-chev svg{width:16px;height:16px}
+.dom-toggle[aria-expanded="true"] .dom-chev{transform:rotate(90deg)}
+.dom-card-dom{
+  font-family:var(--font-mono);font-size:14px;font-weight:600;
+  word-break:break-all;
+}
+.dom-card-date{font-size:12px;color:var(--text-2);flex:none}
+.dom-card-sum{
+  margin-left:auto;font-size:12px;color:var(--text-2);
+  word-break:break-word;
+}
+.dom-del{flex:none;align-self:center}
+.dom-card-b{padding:0 12px 12px}
+.dom-card-b .dom-report{margin-top:2px}
 .dom-block{
   border:1px solid var(--border);border-radius:var(--r-md);
   padding:12px 14px;margin-bottom:10px;background:var(--surface-2);

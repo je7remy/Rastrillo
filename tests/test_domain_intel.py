@@ -287,8 +287,120 @@ class EndpointTest(IsolatedTestCase):
         names = {d["domain"] for d in domains}
         self.assertIn("example.com", names)
         self.assertIn("example.org", names)
-        # cada entrada lleva domain + created_at (lo que el desplegable necesita)
+        # cada entrada lleva domain + created_at (lo que la cabecera de cada
+        # tarjeta del histórico necesita para pintarse plegada)
         self.assertTrue(all("created_at" in d for d in domains))
+
+
+class HistoryCleanupTest(IsolatedTestCase):
+    """Borrado de UN informe y limpieza del histórico completo.
+
+    Igual que el resto del archivo: primitivas de red parcheadas, cero
+    tráfico real. Cada test corre con su propio RASTRILLO_HOME (IsolatedTestCase).
+    """
+
+    def _analyze(self, client, *domains):
+        """Persiste un informe por cada dominio, offline."""
+        from rastrillo import domain_intel
+        with mock.patch.object(domain_intel, "_whois_query", _fake_whois_query), \
+                mock.patch.object(domain_intel, "_dns_query", _fake_dns_query):
+            for d in domains:
+                r = client.post("/api/domain/analyze",
+                                json={"domain": d}, headers=self.hdr())
+                self.assertEqual(r.status_code, 200, f"analyze({d}) falló")
+
+    def _history(self, client):
+        r = client.get("/api/domain/history", headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        return {d["domain"] for d in r.json()["domains"]}
+
+    # --- Borrar un informe concreto -----------------------------------------
+    def test_delete_existing_report_disappears_from_history(self):
+        from rastrillo import db
+        client = auth_client()
+        self._analyze(client, "example.com", "example.org")
+
+        r = client.post("/api/domain/report/delete",
+                        json={"domain": "example.com"}, headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+
+        # Fuera del histórico (endpoint y capa db) y el otro intacto.
+        self.assertEqual(self._history(client), {"example.org"})
+        self.assertEqual({row["domain"] for row in db.list_domain_reports()},
+                         {"example.org"})
+        self.assertIsNone(db.get_domain_report("example.com"))
+
+    def test_delete_unknown_domain_404_and_history_intact(self):
+        client = auth_client()
+        self._analyze(client, "example.com")
+
+        r = client.post("/api/domain/report/delete",
+                        json={"domain": "nunca-analizado.com"},
+                        headers=self.hdr())
+        self.assertEqual(r.status_code, 404)
+        # Mensaje accionable, no un 404 pelado.
+        self.assertIn("nunca-analizado.com", r.json()["detail"])
+        # El resto del histórico no se ha tocado.
+        self.assertEqual(self._history(client), {"example.com"})
+
+    def test_delete_rejects_invalid_domain(self):
+        client = auth_client()
+        r = client.post("/api/domain/report/delete",
+                        json={"domain": "no válido"}, headers=self.hdr())
+        self.assertEqual(r.status_code, 400)
+
+    def test_delete_requires_token(self):
+        client = auth_client()
+        r = client.post("/api/domain/report/delete", json={"domain": "example.com"})
+        self.assertEqual(r.status_code, 401)
+
+    # --- Limpiar todo el histórico ------------------------------------------
+    def test_clear_history_empties_and_snapshots_db(self):
+        from rastrillo import config, db
+        client = auth_client()
+        self._analyze(client, "example.com", "example.org")
+
+        backups = config.BASE_DIR / "backups"
+        antes = len(list(backups.glob("rastrillo_*.db"))) if backups.exists() else 0
+
+        r = client.post("/api/domain/history/clear", json={}, headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["deleted"], 2)
+
+        # Histórico vacío.
+        self.assertEqual(self._history(client), set())
+        self.assertEqual(db.list_domain_reports(), [])
+        # Y se creó el snapshot de la DB antes de borrar (patrón clear_accounts).
+        self.assertTrue(backups.exists(), "no se creó ~/.rastrillo/backups/")
+        self.assertGreater(len(list(backups.glob("rastrillo_*.db"))), antes)
+
+    def test_clear_history_does_not_touch_accounts(self):
+        """El histórico de dominios y las cuentas son datos independientes."""
+        from rastrillo import db
+        client = auth_client()
+        db.init()
+        db.upsert_account("reddit", "yo", source_site="reddit",
+                          profile_url="https://reddit.com/u/yo",
+                          source="sherlock")
+        self._analyze(client, "example.com")
+
+        r = client.post("/api/domain/history/clear", json={}, headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(db.list_domain_reports(), [])
+        self.assertEqual(len(db.list_accounts()), 1)
+
+    def test_clear_history_requires_token(self):
+        client = auth_client()
+        r = client.post("/api/domain/history/clear", json={})
+        self.assertEqual(r.status_code, 401)
+
+    def test_clear_empty_history_is_noop(self):
+        """Sin informes: 200 con deleted=0 (idempotente, no revienta)."""
+        client = auth_client()
+        r = client.post("/api/domain/history/clear", json={}, headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["deleted"], 0)
 
 
 if __name__ == "__main__":

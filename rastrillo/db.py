@@ -27,6 +27,7 @@ Identidad de una cuenta:
   hay source_site; fallback a (platform, identifier) para inserts manuales sin
   source_site.
 """
+import json
 import logging
 import shutil
 import sqlite3
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     recipe_hash TEXT,
     action_meta TEXT,           -- JSON con la Resolution del resolver (link, email, etc.)
     confidence TEXT,            -- high | medium | low (sherlock genera falsos positivos)
+    confidence_reasons TEXT,    -- JSON [{code, desc}] con el POR QUÉ de la confianza
     owned INTEGER DEFAULT 0,    -- 1 = el usuario confirmó "es mía"; 0 = sin confirmar
     sent_at REAL,               -- timestamp UNIX de cuándo se envió la solicitud GDPR
     deletion_eta REAL,          -- timestamp UNIX objetivo: cuándo la plataforma dice que se elimina
@@ -118,15 +120,16 @@ CREATE TABLE accounts__new (
     recipe_hash TEXT,
     action_meta TEXT,
     confidence TEXT,
+    confidence_reasons TEXT,
     owned INTEGER DEFAULT 0
 );
 INSERT INTO accounts__new
     (id, platform, display_name, profile_url, identifier, source, source_site,
      status, deletion_type, difficulty, current_step, last_message,
-     updated_at, recipe_hash, action_meta, confidence, owned)
+     updated_at, recipe_hash, action_meta, confidence, confidence_reasons, owned)
 SELECT id, platform, display_name, profile_url, identifier, source, source_site,
        status, deletion_type, difficulty, current_step, last_message,
-       updated_at, recipe_hash, action_meta, confidence, owned
+       updated_at, recipe_hash, action_meta, confidence, confidence_reasons, owned
 FROM accounts;
 DROP TABLE accounts;
 ALTER TABLE accounts__new RENAME TO accounts;
@@ -185,6 +188,8 @@ def init():
             con.execute("ALTER TABLE accounts ADD COLUMN action_meta TEXT")
         if "confidence" not in cols:
             con.execute("ALTER TABLE accounts ADD COLUMN confidence TEXT")
+        if "confidence_reasons" not in cols:
+            con.execute("ALTER TABLE accounts ADD COLUMN confidence_reasons TEXT")
         if "owned" not in cols:
             con.execute("ALTER TABLE accounts ADD COLUMN owned INTEGER DEFAULT 0")
         if "sent_at" not in cols:
@@ -207,6 +212,42 @@ def init():
         con.executescript(SCHEMA_INDEXES)
 
 
+# --- Motivos de confianza ---------------------------------------------------
+# Se serializan igual que `action_meta`: JSON en una columna TEXT, con
+# `ensure_ascii=False` al escribir y `json.loads` tolerante al leer (una fila
+# vieja o corrupta devuelve [] en vez de reventar la vista).
+def parse_reasons(raw) -> list:
+    """Lee la columna `confidence_reasons`. Nunca lanza: devuelve [] si no hay
+    nada o si el JSON está corrupto."""
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw)
+    except (ValueError, TypeError):
+        _log.warning("confidence_reasons corrupto; lo ignoro")
+        return []
+    return val if isinstance(val, list) else []
+
+
+def dump_reasons(reasons) -> str:
+    """Serializa la lista de motivos (mismo patrón que `action_meta`)."""
+    return json.dumps(reasons or [], ensure_ascii=False)
+
+
+def merge_reasons(previos, nuevos) -> list:
+    """Une motivos sin repetir `code` y preservando el orden de aparición."""
+    out = list(previos or [])
+    vistos = {r.get("code") for r in out if isinstance(r, dict)}
+    for r in nuevos or []:
+        if not isinstance(r, dict):
+            continue
+        if r.get("code") in vistos:
+            continue
+        vistos.add(r.get("code"))
+        out.append(r)
+    return out
+
+
 def upsert_account(platform, identifier, **fields):
     """Inserta una cuenta detectada sin pisar su progreso si ya existe.
 
@@ -216,21 +257,44 @@ def upsert_account(platform, identifier, **fields):
         (p.ej. "Reddit" y "RedditGifts") convivan como filas separadas.
       - Si no viene source_site (inserts manuales / tests) → fallback al
         comportamiento previo (platform, identifier).
+
+    Corroboración en el duplicado (Paso 2A): cuando la fila YA existe y el hit
+    entrante viene de otra fuente, el upsert es un no-op y ese "lo han visto
+    dos herramientas" se perdería. Aquí lo dejamos anotado en
+    `confidence_reasons` antes de salir. Ojo: este caso solo puede ser
+    sherlock+maigret, porque son las únicas dos fuentes que comparten tipo de
+    identificador (username); holehe y hibp usan un email, así que caen en una
+    FILA DISTINTA por construcción y su corroboración se calcula fuera (ver
+    `discovery._corroborar_entre_fuentes`). Por eso aquí NO tocamos el tramo de
+    confianza: dos buscadores de username con catálogos que se solapan no son
+    señal independiente.
     """
     source_site = fields.get("source_site")
     with connect() as con:
         if source_site:
             cur = con.execute(
-                "SELECT id FROM accounts WHERE source_site=? AND identifier=?",
+                "SELECT * FROM accounts WHERE source_site=? AND identifier=?",
                 (source_site, identifier),
             )
         else:
             cur = con.execute(
-                "SELECT id FROM accounts WHERE platform=? AND identifier=?",
+                "SELECT * FROM accounts WHERE platform=? AND identifier=?",
                 (platform, identifier),
             )
         row = cur.fetchone()
         if row:
+            prev_source = (row["source"] or "").strip()
+            new_source = (fields.get("source") or "").strip()
+            if prev_source and new_source and prev_source != new_source:
+                fuentes = " + ".join(sorted({prev_source, new_source}))
+                reasons = merge_reasons(parse_reasons(row["confidence_reasons"]), [
+                    {"code": "corrob_misma_fila",
+                     "desc": f"visto por {fuentes} (mismo username)"},
+                ])
+                con.execute(
+                    "UPDATE accounts SET confidence_reasons=? WHERE id=?",
+                    (dump_reasons(reasons), row["id"]),
+                )
             return row["id"]
         cols = {"platform": platform, "identifier": identifier, "updated_at": time.time()}
         cols.update(fields)
@@ -377,3 +441,38 @@ def list_domain_reports():
         return con.execute(
             "SELECT domain, created_at FROM domain_reports ORDER BY created_at DESC"
         ).fetchall()
+
+
+def delete_domain_report(domain: str) -> bool:
+    """Borra el informe de UN dominio. Devuelve True si existía (y se borró),
+    False si no había nada que borrar.
+
+    El caller (endpoint) usa ese booleano para distinguir 404 de éxito. No
+    hacemos snapshot aquí: es un borrado puntual de un dato re-generable
+    (volver a analizar el dominio lo reconstruye), no una purga masiva.
+    """
+    domain = (domain or "").strip().lower()
+    with connect() as con:
+        cur = con.execute("DELETE FROM domain_reports WHERE domain=?", (domain,))
+        return cur.rowcount > 0
+
+
+def clear_domain_reports() -> int:
+    """Vacía el histórico de Domain Intelligence. Devuelve cuántas filas borró.
+
+    Antes de tocar nada hace un snapshot en ~/.rastrillo/backups/, igual que
+    `clear_accounts`: es el patrón del repo para cualquier operación que
+    destruye datos locales en bloque. No toca la tabla de cuentas.
+    """
+    try:
+        snapshot_db()
+    except Exception as e:
+        # Mismo criterio que clear_accounts: un fallo de copia (disco lleno,
+        # permisos) no aborta la operación; queda en el log.
+        _log.warning("snapshot DB falló (sigo con clear_domain_reports): %s", e)
+    with connect() as con:
+        n = con.execute("SELECT COUNT(*) c FROM domain_reports").fetchone()["c"]
+        con.execute("DELETE FROM domain_reports")
+        # Reseteamos el AUTOINCREMENT para que los próximos IDs empiecen en 1.
+        con.execute("DELETE FROM sqlite_sequence WHERE name='domain_reports'")
+        return n

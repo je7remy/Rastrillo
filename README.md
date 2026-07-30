@@ -263,7 +263,15 @@ Flujo típico:
 
 1. Metes username y/o correo → **Escanear**.
 2. Triage: confirmas cuáles son tuyas. Sherlock genera falsos positivos con
-   usernames cortos — esto no es decorativo.
+   usernames cortos — esto no es decorativo. Cada fila lleva su nivel de
+   confianza (`high`/`medium`/`low`) y, debajo, **chips con el motivo** de
+   esa confianza: por qué subió o bajó. Por ejemplo *"username corto"*,
+   *"coincide en la ruta"*, *"coincide en subdominio"*, *"email + username"*
+   (dos fuentes independientes vieron el mismo sitio), *"2 buscadores"*,
+   *"brecha de datos"*. Pasa el ratón por encima para la explicación
+   completa. Los chips solo aparecen mientras la cuenta no esté confirmada
+   como tuya, que es cuando sirven. Con eso puedes usar **Descartar low**
+   en lote sin miedo.
 3. Para cada cuenta confirmada: **Eliminar**, **Anonimizar** o **Conservar**.
    Las profesionales (`tiktok`, `instagram`, `linkedin`, `github`) salen como
    conservadas por defecto.
@@ -315,6 +323,16 @@ confianza: son **candidatos, no hechos confirmados**.
 > permiso de auditar** (el "rastrillo corporativo"), no para perfilar a
 > terceros. No necesita `whois`/`dig` en el PATH: WHOIS va por TCP/43 (stdlib)
 > y DNS por `dnspython`.
+
+Cada análisis se guarda (un informe por dominio) y el histórico se muestra
+debajo como una lista de tarjetas **colapsables**: la más reciente abierta y
+el resto plegadas, con dominio, fecha y un resumen de una línea (nº de
+registros DNS · nº de correlaciones · registrador) visible sin desplegar.
+Hay **"Colapsar todo"** / **"Expandir todo"**, y el estado plegado se recuerda
+por dominio entre recargas. Puedes **eliminar** un informe suelto o **limpiar
+todo el histórico** (con confirmación; antes de una limpieza total se guarda
+una copia de la base de datos en `~/.rastrillo/backups/`). Consultar el
+histórico no vuelve a la red: solo lee lo ya guardado.
 
 ---
 
@@ -371,7 +389,10 @@ rastrillo/
 │   ├── recipes/            # Recetas de ejemplo
 │   └── static/             # Frontend (index.html + css + js)
 │
-├── tests/                  # 189 tests con unittest stdlib
+├── tests/                  # 247 tests con unittest stdlib
+│   ├── test_confidence_signals.py  # Confianza y falsos positivos (offline)
+│   ├── test_domain_intel.py    # Domain Intelligence (offline, red mockeada)
+│   └── test_resolve_tool.py    # Capa de web search del resolver
 ├── packaging/aur/PKGBUILD  # Empaquetado Arch
 └── .github/workflows/ci.yml
 ```
@@ -464,7 +485,7 @@ IA recibe estructura de página (árbol de accesibilidad + texto visible),
 .venv/bin/python -m unittest discover -t . -s tests -v
 ```
 
-Suite con `unittest` de stdlib, sin dependencias nuevas. **189 tests**
+Suite con `unittest` de stdlib, sin dependencias nuevas. **247 tests**
 (~1 minuto en Windows, ~30 s en Linux). Cada test corre con su propio
 `RASTRILLO_HOME` en tempdir.
 

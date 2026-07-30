@@ -77,23 +77,66 @@ de onboarding (`is_onboarded`, `mark_onboarded`).
 `found, queued, in_progress, awaiting_user, deleted, anonymized,
 user_done, semi_auto, email_draft, pending_deletion, manual, skipped,
 failed, not_mine, dry_run`. Migraciones idempotentes (`recipe_hash`,
-`source_site`, `action_meta`, `confidence`, `owned`, `sent_at`,
-`deletion_eta`, `deletion_started_at`) en `init()`. La
+`source_site`, `action_meta`, `confidence`, `confidence_reasons`, `owned`,
+`sent_at`, `deletion_eta`, `deletion_started_at`) en `init()`. La
 unicidad de cuentas se hace en código por `(source_site, identifier)` —
 NO con UNIQUE en SQL — para no colapsar Reddit y RedditGifts.
 `snapshot_db()` copia la DB a `~/.rastrillo/backups/` antes de
 `clear_accounts`.
+`confidence_reasons` guarda el POR QUÉ de la confianza como JSON
+`[{code, desc}]`, serializado igual que `action_meta`; helpers
+`parse_reasons` (tolerante: [] si falta o está corrupto), `dump_reasons` y
+`merge_reasons` (une sin repetir `code`). `upsert_account` es donde se
+detecta el duplicado, así que es donde anota la corroboración de misma fila
+(`corrob_misma_fila`): sherlock+maigret colapsan en una fila y esa señal se
+perdería. Solo anota el motivo, NO mueve el tramo — por construcción ese
+caso solo puede ser dos buscadores de username, cuyos catálogos se solapan.
 
 `rastrillo/discovery.py` — wrappers a Sherlock (CSV), Holehe (CSV),
 Maigret (JSON, opt-in si está en PATH) y HIBP (opt-in con clave).
-Asigna `confidence` por hit: holehe=high, hibp=medium (es exposición en
-brecha, no cuenta confirmada), sherlock/maigret=heurística por longitud
-y distintividad del username con bump si la URL del hit contiene el
-username literal. Log "crudo -> guardado" por cada fuente.
+Log "crudo -> guardado" por cada fuente.
+
+`_register()` es el ÚNICO sitio donde se decide el tramo BASE de un hit:
+holehe=high, hibp=medium (es exposición en brecha, no cuenta confirmada),
+manual=high, sherlock/maigret=`_sherlock_confidence()` (heurística por
+longitud y distintividad del username). Cada decisión deja motivos
+(`_motivo(code, desc)`) que se persisten en `confidence_reasons`.
+
+El bump de `_sherlock_confidence` pasa por `_identificador_en_url()`
+(`urllib.parse.urlsplit`, sin red), que concede señal SOLO si el
+identificador aparece (a) en el path o el query string **como segmento
+completo**, o (b) como etiqueta más a la izquierda del host **con igualdad
+exacta** (`jeremy.tumblr.com`). Aparecer a media palabra en cualquiera de
+los dos NO cuenta: el viejo `identifier in url` casaba dentro del dominio
+(`ana` subía de tramo por `banana.com`) y era la fuente más directa de
+falsos positivos. La frontera de (a) la impone `_match_con_frontera()`:
+exige separador (`/ - _ . = ? &`) o extremo de cadena a cada lado, y
+recorre TODAS las apariciones (que la primera no valga no descarta una
+posterior legítima: `/marca/mar`). Sin esa frontera el mismo bug revivía
+movido de componente — `mar` casaba en `/marca-noticias/123`.
+La escala base (`len>=8`, `len>=6`+distintivo, `len>=5`, resto) NO cambió.
+
+`_corroborar_entre_fuentes()` es un pase final de `discover()`, SIN red:
+relee la DB (el único sitio donde existe el conjunto completo y ya
+deduplicado) y sube un tramo a las filas heurísticas cuando el mismo
+`source_site` sale de dos tipos de identificador distintos (email vía
+holehe/hibp + username vía sherlock/maigret) — dos caminos independientes
+al mismo sitio. NO fusiona filas: la unicidad sigue siendo
+`(source_site, identifier)`. Las fuentes de confianza POLÍTICA (holehe
+high, hibp medium, manual high) reciben el motivo pero nunca cambian de
+tramo. Nada sube por encima de `high` (`_subir_tramo` tiene techo).
+Quedan fuera del agrupado las filas con el motivo `hibp_no_sitio`: siguen
+en el discovery para que el usuario las revise, pero no corroboran ni son
+corroboradas (ver `hibp.py`).
 
 `rastrillo/hibp.py` — cliente mínimo de HaveIBeenPwned. Skipped en
 silencio si no hay API key. Convierte cada brecha confirmada en un hit
-con el dominio del sitio brechado.
+con el dominio del sitio brechado. Las brechas con `Domain` vacío se
+DESCARTAN (no hay sitio al que ir a borrar): es el caso de los volcados
+agregados tipo "Collection #1". Las que sí traen dominio pero llevan
+`IsSpamList`, `IsFabricated` o `IsVerified=false` entran al discovery
+marcadas con `no_site=True` → `_register` les pone el motivo
+`hibp_no_sitio` y quedan excluidas de la corroboración (no del discovery).
 
 `rastrillo/directory.py` — directorio público (JustDeleteMe). Fetch
 remoto + caché + lookup por host (exacto y por sufijo para subdominios).
@@ -208,11 +251,23 @@ errores visibles, un fallo no aborta el resto. Las dos primitivas de red
 (`_whois_query`, `_dns_query`) son mockeables. El socket WHOIS pasa por
 `_host_resolves_public` (mismo criterio anti-SSRF que `resolver`). La
 correlación NO hace HTTP extra. Persistencia en la tabla `domain_reports`
-(`db.save_domain_report`/`get_domain_report`/`list_domain_reports`).
+(`db.save_domain_report`/`get_domain_report`/`list_domain_reports`/
+`delete_domain_report`/`clear_domain_reports`; el clear hace `snapshot_db()`
+antes de borrar, igual que `clear_accounts`).
 Endpoints `POST /api/domain/analyze`, `GET /api/domain/report?domain=`,
-`GET /api/domain/history`. Vista en el dashboard (sección
-"Inteligencia de dominio"). Decisión de dependencias justificada en la
-cabecera del módulo.
+`GET /api/domain/history`, `POST /api/domain/report/delete` (body
+`{domain}`; 400 inválido / 404 si no está en el histórico) y
+`POST /api/domain/history/clear` (→ `{ok, deleted}`). Ambos borrados van
+por **POST y no DELETE** a propósito: el `auth_middleware` solo exige token
+en POST y en los GET de `/api/*`, así que un DELETE entraría sin token.
+Vista en el dashboard (sección "Inteligencia de dominio"): el histórico se
+pinta como lista de tarjetas colapsables (la más reciente abierta), con
+"Colapsar todo"/"Expandir todo", borrado por tarjeta y "Limpiar historial",
+todo con confirmación. El estado plegado se recuerda por dominio en
+`localStorage` (`rastrillo.domain.collapsed`). Estos borrados NO pasan por
+`audit.py`: ese log es de acciones destructivas sobre CUENTAS
+(`record(action, account)` serializa un snapshot de cuenta). Decisión de
+dependencias justificada en la cabecera del módulo.
 
 ## Convenciones
 
@@ -273,6 +328,17 @@ Archivos:
 - `tests/test_anti_false_deleted.py` — `revisit_profile` + detección
   de redirect a login; `_confirm_and_seal` no sella `deleted` en
   falsos positivos.
+- `tests/test_confidence_signals.py` — falsos positivos sin red: la regla
+  nueva del bump (substring de dominio no cuenta, substring a media palabra
+  en el path tampoco, frontera de segmento con sus separadores, path y
+  subdominio legítimos sí, identificadores de 1-2 caracteres, `url=None` e
+  identificador vacío sin excepción, escala base intacta), corroboración
+  entre fuentes (holehe+sherlock = dos filas separadas y señal fuerte;
+  sherlock+maigret = una fila y señal débil que no mueve tramo; techo en
+  `high`), HIBP en la corroboración (`Domain` vacío no llega a hit; spam
+  list / fabricada / sin verificar no corroboran pero siguen en el
+  discovery), y persistencia de motivos (migración idempotente, round-trip,
+  `parse_reasons` tolerante a basura, la API los devuelve ya parseados).
 - `tests/test_domain_intel.py` — Domain Intelligence offline: parseo
   WHOIS recursivo y DNS desde fixtures (primitivas de red mockeadas),
   reglas de correlación (MX→Google, NS→Cloudflare, SPF, verificaciones
@@ -280,7 +346,7 @@ Archivos:
   guard anti-SSRF del socket WHOIS, y los endpoints (401 sin token, 400
   dominio inválido, happy-path con persistencia).
 
-Alrededor de 189 tests en menos de un minuto. Antes de cualquier cambio
+Alrededor de 247 tests en menos de un minuto. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -334,3 +400,17 @@ Cosas que se podrían apretar más:
   redirect intermedio, captcha simulado.
 - Maigret: documentar mejor el flujo de instalación opt-in y los pros y
   contras frente a Sherlock.
+- Histórico de Inteligencia de dominio: hoy la vista pide los N informes en
+  paralelo (`GET /api/domain/report` por dominio) al cargar. Vale para el
+  volumen actual, pero si el histórico crece a 20–30 dominios el arreglo es
+  cargar el informe **al expandir** la tarjeta (el endpoint ya sirve
+  exactamente eso) y cachearlo en memoria. Ojo: la cabecera plegada muestra
+  un resumen calculado del informe (nº de registros DNS · nº de
+  correlaciones), así que hacerlo perezoso obliga a que
+  `GET /api/domain/history` devuelva esos contadores.
+- `~/.rastrillo/backups/` no rota ni tiene tope: `db.snapshot_db()` escribe
+  un `.db` nuevo en cada borrado masivo (`clear_accounts` y ahora también
+  `clear_domain_reports`) y nadie los borra — a diferencia de `audit.json`,
+  que sí rota por `RASTRILLO_AUDIT_MAX_BYTES`. Además el timestamp tiene
+  resolución de segundo (`%Y%m%d-%H%M%S`), así que dos snapshots en el mismo
+  segundo se pisan (`audit.py` usa microsegundos y no tiene ese problema).

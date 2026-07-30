@@ -218,6 +218,9 @@ def api_accounts():
         # cuenta tiene un plazo fijado; si no, queda None.
         d["deletion"] = deletion_progress(d.get("deletion_started_at"),
                                           d.get("deletion_eta"))
+        # Motivos de la confianza: la columna guarda JSON (como action_meta);
+        # la UI recibe la lista ya parseada para no repetir el json.parse.
+        d["confidence_reasons"] = db.parse_reasons(d.get("confidence_reasons"))
         rows.append(d)
     return JSONResponse({
         "accounts": rows,
@@ -906,6 +909,42 @@ def api_domain_history():
     rows = db.list_domain_reports()
     return {"domains": [{"domain": r["domain"], "created_at": r["created_at"]}
                         for r in rows]}
+
+
+# POST (no DELETE) a propósito: el auth_middleware exige token en todos los
+# POST y en los GET de /api/*, pero NO en otros métodos — un DELETE entraría
+# sin token. Mientras eso siga así, cualquier operación destructiva va por POST.
+@app.post("/api/domain/report/delete")
+def api_domain_report_delete(body: DomainBody):
+    """Borra el informe guardado de UN dominio del histórico.
+
+    Normaliza igual que /api/domain/analyze (`.strip().lower()` +
+    `valid_domain`) para no crear una segunda semántica de normalización.
+    """
+    domain = (body.domain or "").strip().lower()
+    if not domain_intel.valid_domain(domain):
+        raise HTTPException(400, "Dominio inválido. Ejemplo válido: ejemplo.com")
+    db.init()
+    if not db.delete_domain_report(domain):
+        raise HTTPException(
+            404,
+            f"No hay informe guardado de {domain}. Comprueba el dominio o "
+            f"recarga el histórico: puede que ya se haya borrado.",
+        )
+    return {"ok": True, "domain": domain}
+
+
+@app.post("/api/domain/history/clear")
+def api_domain_history_clear():
+    """Vacía el histórico de Domain Intelligence. Devuelve cuántos borró.
+
+    `db.clear_domain_reports()` hace snapshot de la DB antes de tocar nada
+    (mismo patrón que clear_accounts). No pasa por audit.py: ese log es de
+    acciones destructivas sobre CUENTAS, no sobre datos públicos WHOIS/DNS.
+    """
+    db.init()
+    n = db.clear_domain_reports()
+    return {"ok": True, "deleted": n}
 
 
 @app.post("/api/directory/refresh")

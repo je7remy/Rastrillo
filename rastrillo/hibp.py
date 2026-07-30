@@ -87,15 +87,31 @@ def run_hibp(email: str, timeout: float = 30.0) -> Dict[str, Any]:
         domain = (b.get("Domain") or "").strip().lower()
         title = (b.get("Title") or b.get("Name") or "").strip()
         if not domain:
+            # Sin dominio no hay sitio al que ir a borrar nada. Es el caso de
+            # los volcados agregados tipo "Collection #1": HIBP los publica
+            # con Domain vacío porque no son la brecha de UN sitio.
+            log.info("hibp: salto %r (sin Domain)", title or "?")
             continue
         hits.append({
             "name": title or domain,
             "url": None,
             "source_site": domain,
+            # ¿Esta entrada NO es evidencia de una cuenta en un sitio real?
+            # Tres banderas de HIBP dicen exactamente eso:
+            #   IsSpamList   → lista de spam/marketing, no una brecha.
+            #   IsFabricated → datos inventados por el atacante.
+            #   IsVerified=0 → HIBP no ha podido verificar que sea legítima.
+            # Sigue entrando al discovery (tú decides si te suena el sitio),
+            # pero no debe CORROBORAR nada: ver discovery._register.
+            "no_site": bool(b.get("IsSpamList") or b.get("IsFabricated")
+                            or not b.get("IsVerified", True)),
             "extra": {
                 "breach_date": b.get("BreachDate"),
                 "pwn_count": b.get("PwnCount"),
                 "data_classes": b.get("DataClasses") or [],
+                "is_verified": b.get("IsVerified"),
+                "is_spam_list": b.get("IsSpamList"),
+                "is_fabricated": b.get("IsFabricated"),
             },
         })
     return {"hits": hits, "error": error, "incomplete": False,

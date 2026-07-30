@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 from . import db, config, hibp
@@ -102,41 +103,233 @@ def _valid_email(e: str) -> bool:
 # Sherlock genera falsos positivos por usernames cortos o muy comunes. El
 # score etiqueta cada hallazgo para que la UI ofrezca un triage antes de
 # permitir cualquier acción destructiva.
+_TRAMOS = ("low", "medium", "high")
+
+
+def _subir_tramo(tramo: str) -> str:
+    """Sube un tramo de confianza. Nunca por encima de `high`."""
+    try:
+        i = _TRAMOS.index(tramo)
+    except ValueError:
+        return "low"
+    return _TRAMOS[min(i + 1, len(_TRAMOS) - 1)]
+
+
+def _motivo(code: str, desc: str) -> dict:
+    """Motivo de confianza: código corto (estable, para la UI) + descripción
+    corta en español. Se persisten en `accounts.confidence_reasons`."""
+    return {"code": code, "desc": desc}
+
+
 def _holehe_confidence() -> str:
     """Holehe consulta el sitio con el email: si confirma "esta cuenta existe",
     el identificador es único (un email). Siempre alta."""
     return "high"
 
 
-def _sherlock_confidence(username: str, hit: dict) -> str:
-    """Sherlock detecta por username. La confianza baja con usernames cortos o
-    sin caracteres distintivos. Sube si la URL del hit contiene el username
-    como segmento (e.g. /user/je7remy)."""
+# Separadores que delimitan un segmento dentro de un path o un query string.
+# Un match del identificador solo cuenta si a cada lado hay uno de estos (o el
+# extremo de la cadena): sin esta frontera, un substring suelto reproduce el
+# mismo falso positivo que arreglamos en el host, solo movido de componente
+# (`mar` casaría en `/marca-noticias/123`).
+_SEPARADORES_URL = "/-_.=?&"
+
+
+def _match_con_frontera(needle: str, haystack: str) -> bool:
+    """¿`needle` aparece en `haystack` como segmento completo?
+
+    Exige separador o extremo de cadena a cada lado. Recorre TODAS las
+    apariciones: que la primera no valga no descarta una posterior legítima
+    (`/marca/mar` → la segunda sí cuenta).
+    """
+    if not needle or not haystack:
+        return False
+    i = haystack.find(needle)
+    while i != -1:
+        antes = haystack[i - 1] if i > 0 else ""
+        fin = i + len(needle)
+        despues = haystack[fin] if fin < len(haystack) else ""
+        if ((not antes or antes in _SEPARADORES_URL)
+                and (not despues or despues in _SEPARADORES_URL)):
+            return True
+        i = haystack.find(needle, i + 1)
+    return False
+
+
+def _identificador_en_url(identifier: str, url):
+    """¿La URL del hit respalda el identificador? → "path" | "subdominio" | None.
+
+    Reemplaza al viejo `identifier.lower() in url.lower()`, que casaba dentro
+    del dominio y era nuestra fuente más directa de falsos positivos: el
+    username `ana` subía de tramo por `https://banana.com/u/xyz`.
+
+    Solo cuentan dos sitios:
+      (a) el path o el query string, como SEGMENTO COMPLETO — `/u/jeremy`,
+          `/perfil?user=jeremy`, `/jeremy-perfil`. Un substring a media
+          palabra no vale: `mar` en `/marca-noticias/123` es el mismo bug de
+          `banana.com`, solo movido de componente. Ver `_match_con_frontera`.
+      (b) la etiqueta MÁS A LA IZQUIERDA del host, con igualdad exacta —
+          `jeremy.tumblr.com`, `jeremy.wordpress.com`. Es señal legítima de
+          los sitios que dan subdominio por usuario y no queremos perderla.
+
+    Aparecer en cualquier OTRA parte del host no cuenta (`ana` en `banana.com`
+    no vale, ni `jeremy` en `blog.jeremyland.com`).
+    """
+    u = (identifier or "").strip().lower()
+    if not u or not url:
+        return None
+    try:
+        # Sin esquema, urlsplit metería el host en `path`; el prefijo // evita
+        # ese modo y nos da netloc siempre que haya host.
+        parts = urllib.parse.urlsplit(url if "://" in url else "//" + url)
+    except ValueError:
+        return None
+
+    # (a) path + query, como segmento. El '?' que los une hace de frontera
+    # tanto si hay query como si no.
+    if _match_con_frontera(u, f"{parts.path or ''}?{parts.query or ''}".lower()):
+        return "path"
+
+    # (b) etiqueta izquierda del host (quitando credenciales y puerto)
+    host = (parts.netloc or "").split("@")[-1].split(":")[0].lower()
+    if host and host.split(".")[0] == u:
+        return "subdominio"
+    return None
+
+
+def _sherlock_confidence(username: str, hit: dict):
+    """Confianza de un hit por username (sherlock y maigret comparten esto).
+
+    Devuelve `(confidence, motivos)`: el tramo (`high|medium|low`) y la lista
+    de motivos que lo justifican, para que el triage no sea una caja negra.
+
+    Escala base (por longitud / distintividad del username) + un bump por que
+    la URL respalde el identificador (ver `_identificador_en_url`).
+    """
     u = (username or "").strip()
     if not u:
-        return "low"
+        return "low", [_motivo("id_vacio", "sin identificador que corroborar")]
+
     has_distinct = any(c.isdigit() or c in "._-" for c in u)
     # Base por longitud / distintividad
     if len(u) >= 8 or (len(u) >= 6 and has_distinct):
         base = "high"
+        motivos = [_motivo(
+            "tramo_distintivo",
+            f"username de {len(u)} caracteres"
+            + (" con dígitos o separadores" if len(u) < 8 else ""),
+        )]
     elif len(u) >= 5:
         base = "medium"
+        motivos = [_motivo("tramo_corto",
+                           f"username de {len(u)} caracteres, poco distintivo")]
     else:
         base = "low"
-    # Bump si la URL del hit incluye el username literal en el path
-    url = (hit.get("url") or "").lower()
-    if u.lower() in url:
-        if base == "low":
-            base = "medium"
-        elif base == "medium":
-            base = "high"
-    return base
+        motivos = [_motivo("tramo_muy_corto",
+                           f"username de {len(u)} caracteres, muy común")]
+
+    # Bump: solo si la URL respalda el identificador de verdad.
+    donde = _identificador_en_url(u, (hit or {}).get("url"))
+    if donde == "path":
+        base = _subir_tramo(base)
+        motivos.append(_motivo("bump_path",
+                               "el username aparece en la ruta de la URL"))
+    elif donde == "subdominio":
+        base = _subir_tramo(base)
+        motivos.append(_motivo("bump_subdominio",
+                               "el username es el subdominio del sitio"))
+    return base, motivos
 
 
 # --- Slugify, host y matching de recetas ------------------------------------
 # Tarea 9: la lógica vive en `rastrillo.hostutil`; aquí mantenemos los nombres
 # locales como aliases para no tocar todos los call sites internos.
 from .hostutil import slugify as _slugify, host_from_url as _host_from_url
+
+
+# --- Corroboración entre fuentes (sin red) ----------------------------------
+# Tipo de identificador con el que trabaja cada fuente. La corroboración FUERTE
+# exige que un mismo sitio salga de dos tipos DISTINTOS (un email y un
+# username): son dos caminos independientes hasta el mismo sitio.
+_TIPO_IDENTIFICADOR = {
+    "holehe": "email",
+    "hibp": "email",
+    "hibp_confirmed": "email",
+    "sherlock": "username",
+    "maigret": "username",
+}
+
+# Fuentes cuya confianza es POLÍTICA, no estimación: holehe siempre high, hibp
+# siempre medium (exposición ≠ cuenta), manual siempre high. La corroboración
+# anota el motivo en ellas pero NO les mueve el tramo; solo ajusta las que
+# vienen de la heurística por username.
+_FUENTES_HEURISTICAS = ("sherlock", "maigret")
+
+
+def _corroborar_entre_fuentes() -> int:
+    """Sube un tramo a los hallazgos por username que otra fuente corrobora.
+
+    Cero red: solo relee lo ya persistido. Se ejecuta como pase final de
+    `discover()` porque la DB es el ÚNICO sitio donde existe el conjunto
+    completo y ya deduplicado de hallazgos (con `source`, `source_site` e
+    `identifier` por fila); `summary` solo lleva contadores y `_register` ve un
+    hit a la vez, así que ninguno de los dos puede verlo.
+
+    Dos filas del mismo `source_site` con tipos de identificador distintos
+    (holehe/hibp por email + sherlock/maigret por username) son dos caminos
+    independientes al mismo sitio: señal fuerte. NO se fusionan — la unicidad
+    sigue siendo `(source_site, identifier)` y romperla colapsaría casos
+    legítimos como Reddit/RedditGifts. La corroboración se CALCULA comparando
+    `source_site` entre filas y se anota en cada una.
+
+    Quedan FUERA las filas marcadas con `hibp_no_sitio` (volcado agregado,
+    lista de spam o brecha sin verificar): siguen en el discovery para que las
+    revises, pero corroborar contra ellas sería corroborar contra algo que no
+    es un sitio donde tuvieras cuenta. No corroboran ni son corroboradas.
+
+    Devuelve cuántas filas subieron de tramo.
+    """
+    por_sitio = {}
+    for row in db.list_accounts():
+        sitio = (row["source_site"] or "").strip().lower()
+        if not sitio:
+            continue
+        codes = {r.get("code") for r in db.parse_reasons(row["confidence_reasons"])}
+        if "hibp_no_sitio" in codes:
+            continue
+        por_sitio.setdefault(sitio, []).append(row)
+
+    subidas = 0
+    for sitio, filas in por_sitio.items():
+        if len(filas) < 2:
+            continue
+        tipos = {_TIPO_IDENTIFICADOR.get((f["source"] or "").strip())
+                 for f in filas}
+        if "email" not in tipos or "username" not in tipos:
+            continue   # no hay dos caminos independientes
+
+        for row in filas:
+            fuente = (row["source"] or "").strip()
+            otras = sorted({(f["source"] or "").strip() for f in filas
+                            if f["id"] != row["id"] and f["source"]})
+            if not otras:
+                continue
+            motivos = db.merge_reasons(
+                db.parse_reasons(row["confidence_reasons"]),
+                [_motivo("corrob_cruzada",
+                         f"el mismo sitio salió también de {', '.join(otras)}")],
+            )
+            campos = {"confidence_reasons": db.dump_reasons(motivos)}
+            if fuente in _FUENTES_HEURISTICAS:
+                nuevo = _subir_tramo(row["confidence"] or "low")
+                if nuevo != row["confidence"]:
+                    campos["confidence"] = nuevo
+                    subidas += 1
+            db.update_account(row["id"], **campos)
+
+    if subidas:
+        log.info("corroboración cruzada: %d filas subieron de tramo", subidas)
+    return subidas
 
 
 def _match_recipe(name, url, recipes):
@@ -480,9 +673,14 @@ def discover(usernames, emails):
         url = hit.get("url")
         source_site = hit.get("source_site") or _host_from_url(url) or name.lower()
 
-        # Score de confianza (sherlock/maigret generan falsos positivos)
+        # Score de confianza (sherlock/maigret generan falsos positivos).
+        # ÚNICO sitio donde se decide el tramo BASE de un hit; la corroboración
+        # entre fuentes se aplica después, en _corroborar_entre_fuentes().
+        motivos = []
         if source == "holehe":
             confidence = _holehe_confidence()
+            motivos.append(_motivo(
+                "fuente_holehe", "holehe confirmó el email en este sitio"))
         elif source == "hibp":
             # HIBP: el email apareció en un volcado de datos del dominio. Eso
             # NO confirma que tengas cuenta activa allí (puede ser una cuenta
@@ -491,14 +689,23 @@ def discover(usernames, emails):
             # que el auto-resolver/process-all-auto excluyan estos hits hasta
             # que tú confirmes "sí, tengo cuenta aquí".
             confidence = "medium"
-        elif source == "sherlock":
-            confidence = _sherlock_confidence(identifier, hit)
-        elif source == "maigret":
-            # Misma naturaleza que sherlock (búsqueda por username); reusamos
-            # la misma heurística de longitud/distintividad/match-en-URL.
-            confidence = _sherlock_confidence(identifier, hit)
+            motivos.append(_motivo(
+                "fuente_hibp", "exposición en brecha, no cuenta confirmada"))
+            # Volcado agregado / lista de spam / brecha sin verificar: entra al
+            # discovery pero queda marcado para que NO corrobore (ver
+            # _corroborar_entre_fuentes). El motivo se persiste, así que la
+            # exclusión sobrevive entre runs sin columna nueva.
+            if hit.get("no_site"):
+                motivos.append(_motivo(
+                    "hibp_no_sitio",
+                    "volcado agregado o sin verificar: no respalda una cuenta"))
+        elif source in ("sherlock", "maigret"):
+            # Maigret tiene la misma naturaleza que sherlock (búsqueda por
+            # username); reusamos la misma heurística.
+            confidence, motivos = _sherlock_confidence(identifier, hit)
         else:
             confidence = "high"   # manual: el usuario lo metió a mano
+            motivos.append(_motivo("fuente_manual", "la añadiste tú a mano"))
 
         recipe_slug, recipe = _match_recipe(name, url, recipes)
         # Slug usado para 'platform' (encontrar receta + KEEP check):
@@ -517,6 +724,7 @@ def discover(usernames, emails):
             profile_url=url,
             display_name=(recipe.get("display_name") if recipe else None) or name,
             confidence=confidence,
+            confidence_reasons=db.dump_reasons(motivos),
         )
         if recipe:
             fields["deletion_type"] = recipe.get("deletion_type", "unknown")
@@ -602,6 +810,10 @@ def discover(usernames, emails):
         for h in hibp_result["hits"]:
             if _register(h, e, "hibp"):
                 summary["raw_counts"]["hibp_saved"] += 1
+
+    # Pase final SIN red: corroboración entre fuentes sobre el conjunto ya
+    # completo y deduplicado que vive en la DB (ver la función).
+    summary["corroborated"] = _corroborar_entre_fuentes()
 
     rc = summary["raw_counts"]
     log.info(

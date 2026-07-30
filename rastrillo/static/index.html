@@ -114,14 +114,31 @@
       </button>
       <span id="dom-status" class="status"></span>
     </div>
-    <!-- Histórico: dominios ya analizados (persistidos en domain_reports). Al
-         seleccionar uno se recarga su informe guardado SIN volver a la red.
+    <!-- Histórico: un informe por dominio (persistidos en domain_reports).
+         Cada informe es una tarjeta colapsable; se abre el más reciente y el
+         resto quedan plegados para que la sección no crezca sin límite.
+         Ninguna de estas acciones vuelve a la red: se lee lo guardado.
          Oculto mientras no haya nada analizado. -->
-    <div id="dom-history-wrap" class="field" style="display:none">
-      <label class="field-label" for="dom-history">Analizados antes</label>
-      <select id="dom-history" class="input"></select>
+    <div id="dom-history-wrap" class="dom-history" style="display:none">
+      <div class="section-h dom-history-h">
+        <div class="section-title" id="dom-history-count">Informes guardados</div>
+        <!-- Los controles globales se ocultan cuando no hay nada que colapsar
+             ni limpiar; el hueco lo llena el estado vacío de la lista. -->
+        <div class="section-tools" id="dom-history-tools">
+          <button id="dom-collapse-all" class="btn btn-sm btn-ghost" type="button"
+                  title="Plegar todos los informes">Colapsar todo</button>
+          <button id="dom-expand-all" class="btn btn-sm btn-ghost" type="button"
+                  title="Desplegar todos los informes">Expandir todo</button>
+          <button id="dom-clear-btn" class="btn btn-sm btn-danger" type="button"
+                  title="Borrar todos los informes de dominio guardados"
+                  aria-label="Limpiar el histórico de informes de dominio">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+            Limpiar historial
+          </button>
+        </div>
+      </div>
+      <div id="dom-history-list" class="dom-result" aria-live="polite"></div>
     </div>
-    <div id="dom-result" class="dom-result" aria-live="polite"></div>
   </section>
 
   <!-- 2. Stats ─────────────────────────────────────────── -->
