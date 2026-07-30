@@ -364,7 +364,8 @@ def snapshot_db() -> Optional[Path]:
         return None
     backup_dir = config.BASE_DIR / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    ahora = time.time()
+    ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime(ahora)) + f"-{int(ahora % 1 * 1_000_000):06d}"
     target = backup_dir / f"rastrillo_{ts}.db"
     # Con WAL activo, los writes recientes viven en `<db>-wal` y solo se
     # consolidan al rotar el log. Copiar el .db a pelo dejaría fuera esos

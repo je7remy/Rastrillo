@@ -58,7 +58,7 @@ def _rotate_if_big() -> Optional[Path]:
     # mismo segundo (poco probable en producción, frecuente en tests) no
     # colisionen.
     import datetime as _dt
-    ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     rotated = AUDIT_PATH.with_name(f"audit_{ts}.json")
     try:
         AUDIT_PATH.rename(rotated)
