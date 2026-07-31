@@ -17,6 +17,19 @@ Estados:
   not_mine     -> el usuario descartó como falso positivo (triage)
   dry_run      -> simulación: se mostró el plan pero no se ejecutó
 
+Confianza y verificabilidad son DOS EJES DISTINTOS (Paso 2C, Entrega 1):
+
+  `confidence`    -> ¿qué tan probable es que esta cuenta sea del usuario?
+                     La deciden `discovery._register` y la corroboración de 2A.
+  `verifiability` -> ¿la respuesta de ESE SITIO sirve para comprobar algo?
+                     La decide el canario (`canario.py`) y NO dice nada sobre
+                     la propiedad de la cuenta.
+
+Meterlos en la misma columna encadenaba "inverificable -> low -> descartar ->
+no es mía", que es afirmar algo sobre la propiedad a partir de una señal que
+no habla de propiedad. Por eso `verifiability` es columna aparte y el canario
+no toca `confidence` en ninguna dirección.
+
 Identidad de una cuenta:
   - `platform` es un slug interno usado para casar con recetas (engine.get_recipe).
   - `source_site` es el host/dominio real que reportó el escáner (e.g.
@@ -48,30 +61,62 @@ _log = logging.getLogger("rastrillo.db")
 # explotaría antes de que la migración (ALTER TABLE ADD COLUMN) tenga ocasión
 # de añadir la columna. Por eso primero creamos/migramos la tabla y al final
 # aplicamos los índices.
-SCHEMA_TABLES = """
-CREATE TABLE IF NOT EXISTS accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    platform TEXT NOT NULL,
-    display_name TEXT,
-    profile_url TEXT,
-    identifier TEXT,            -- username o email con el que se detectó
-    source TEXT,                -- sherlock | holehe | manual
-    source_site TEXT,           -- host/dominio real del sitio detectado
-    status TEXT NOT NULL DEFAULT 'found',
-    deletion_type TEXT,         -- full | anonymize | manual | unknown
-    difficulty TEXT,
-    current_step INTEGER DEFAULT 0,
-    last_message TEXT,
-    updated_at REAL,
-    recipe_hash TEXT,
-    action_meta TEXT,           -- JSON con la Resolution del resolver (link, email, etc.)
-    confidence TEXT,            -- high | medium | low (sherlock genera falsos positivos)
-    confidence_reasons TEXT,    -- JSON [{code, desc}] con el POR QUÉ de la confianza
-    owned INTEGER DEFAULT 0,    -- 1 = el usuario confirmó "es mía"; 0 = sin confirmar
-    sent_at REAL,               -- timestamp UNIX de cuándo se envió la solicitud GDPR
-    deletion_eta REAL,          -- timestamp UNIX objetivo: cuándo la plataforma dice que se elimina
-    deletion_started_at REAL    -- timestamp UNIX de cuándo el usuario fijó el plazo (ancla del progreso)
-);
+# Columnas de `accounts` como DATO y no como texto SQL suelto. Es la ÚNICA
+# fuente de verdad del esquema: de aquí salen tanto el CREATE TABLE inicial
+# como la tabla temporal del rebuild de DBs legacy.
+#
+# Antes había dos listas: este CREATE y una copia literal dentro de
+# `_REBUILD_WITHOUT_UNIQUE`. La copia se quedó atrás y dejó fuera `sent_at`,
+# `deletion_eta` y `deletion_started_at`, así que migrar una DB legacy con
+# UNIQUE PERDÍA esos tres campos en silencio. Con una sola lista esa deriva ya
+# no puede ocurrir: si añades una columna aquí, el rebuild la conoce.
+_ACCOUNTS_COLUMNS = [
+    ("id", "INTEGER PRIMARY KEY AUTOINCREMENT", ""),
+    ("platform", "TEXT NOT NULL", ""),
+    ("display_name", "TEXT", ""),
+    ("profile_url", "TEXT", ""),
+    ("identifier", "TEXT", "username o email con el que se detectó"),
+    ("source", "TEXT", "sherlock | holehe | manual"),
+    ("source_site", "TEXT", "host/dominio real del sitio detectado"),
+    ("status", "TEXT NOT NULL DEFAULT 'found'", ""),
+    ("deletion_type", "TEXT", "full | anonymize | manual | unknown"),
+    ("difficulty", "TEXT", ""),
+    ("current_step", "INTEGER DEFAULT 0", ""),
+    ("last_message", "TEXT", ""),
+    ("updated_at", "REAL", ""),
+    ("recipe_hash", "TEXT", ""),
+    ("action_meta", "TEXT", "JSON con la Resolution del resolver (link, email…)"),
+    ("confidence", "TEXT", "high | medium | low (sherlock genera falsos positivos)"),
+    ("confidence_reasons", "TEXT", "JSON [{code, desc}] con el POR QUÉ de la confianza"),
+    ("verifiability", "TEXT", "veredicto del canario: ¿se puede verificar este sitio?"),
+    ("owned", "INTEGER DEFAULT 0", "1 = el usuario confirmó 'es mía'; 0 = sin confirmar"),
+    ("sent_at", "REAL", "timestamp UNIX de cuándo se envió la solicitud GDPR"),
+    ("deletion_eta", "REAL", "timestamp UNIX objetivo: cuándo se elimina según la plataforma"),
+    ("deletion_started_at", "REAL", "timestamp UNIX de cuándo el usuario fijó el plazo"),
+]
+
+ACCOUNTS_COLUMN_NAMES = tuple(nombre for nombre, _, _ in _ACCOUNTS_COLUMNS)
+
+
+def _ddl_accounts(tabla: str = "accounts", if_not_exists: bool = False) -> str:
+    """CREATE TABLE de `accounts` con el nombre que se le pida.
+
+    El rebuild necesita exactamente este esquema para la tabla temporal; que lo
+    genere la misma función es lo que garantiza que no vuelva a divergir.
+    """
+    prefijo = "CREATE TABLE IF NOT EXISTS" if if_not_exists else "CREATE TABLE"
+    lineas = [(f"    {nombre} {tipo}", comentario)
+              for nombre, tipo, comentario in _ACCOUNTS_COLUMNS]
+    ancho = max(len(l) for l, _ in lineas) + 1        # +1 por la coma
+    partes = []
+    for i, (linea, comentario) in enumerate(lineas):
+        coma = "," if i < len(lineas) - 1 else ""
+        texto = (linea + coma).ljust(ancho)
+        partes.append((texto + (f"  -- {comentario}" if comentario else "")).rstrip())
+    return f"{prefijo} {tabla} (\n" + "\n".join(partes) + "\n)"
+
+
+SCHEMA_TABLES = _ddl_accounts("accounts", if_not_exists=True) + """;
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER,
@@ -99,41 +144,52 @@ CREATE INDEX IF NOT EXISTS idx_domain_reports_domain
     ON domain_reports(domain);
 """
 
-# Migración para DB anteriores que tenían UNIQUE(platform, identifier): se
-# detecta leyendo `sqlite_master.sql` y, si está, recreamos la tabla sin
-# UNIQUE preservando todas las filas existentes.
-_REBUILD_WITHOUT_UNIQUE = """
-CREATE TABLE accounts__new (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    platform TEXT NOT NULL,
-    display_name TEXT,
-    profile_url TEXT,
-    identifier TEXT,
-    source TEXT,
-    source_site TEXT,
-    status TEXT NOT NULL DEFAULT 'found',
-    deletion_type TEXT,
-    difficulty TEXT,
-    current_step INTEGER DEFAULT 0,
-    last_message TEXT,
-    updated_at REAL,
-    recipe_hash TEXT,
-    action_meta TEXT,
-    confidence TEXT,
-    confidence_reasons TEXT,
-    owned INTEGER DEFAULT 0
-);
-INSERT INTO accounts__new
-    (id, platform, display_name, profile_url, identifier, source, source_site,
-     status, deletion_type, difficulty, current_step, last_message,
-     updated_at, recipe_hash, action_meta, confidence, confidence_reasons, owned)
-SELECT id, platform, display_name, profile_url, identifier, source, source_site,
-       status, deletion_type, difficulty, current_step, last_message,
-       updated_at, recipe_hash, action_meta, confidence, confidence_reasons, owned
-FROM accounts;
-DROP TABLE accounts;
-ALTER TABLE accounts__new RENAME TO accounts;
-"""
+def _tiene_unique_legacy(con) -> bool:
+    """¿La tabla `accounts` arrastra el UNIQUE(platform, identifier) viejo?
+
+    Se lee del DDL guardado en `sqlite_master`, que es donde SQLite conserva el
+    CREATE TABLE literal con el que se creó.
+    """
+    fila = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='accounts'"
+    ).fetchone()
+    ddl = (fila["sql"] if fila else "") or ""
+    return "UNIQUE" in ddl.upper() and "platform" in ddl.lower()
+
+
+def _rebuild_sin_unique(con) -> None:
+    """Recrea `accounts` sin el UNIQUE(platform, identifier) heredado, que
+    colapsaba hallazgos de sitios distintos con el mismo slug de receta.
+
+    Copia TODAS las columnas que la tabla vieja y el esquema actual tienen en
+    común, calculadas en tiempo de ejecución. La versión anterior llevaba la
+    lista escrita a mano y se había quedado atrás: dejaba fuera `sent_at`,
+    `deletion_eta` y `deletion_started_at`, de modo que migrar una DB legacy
+    con UNIQUE borraba en silencio los plazos de eliminación y la fecha de
+    envío de las solicitudes GDPR. Con la intersección dinámica el problema no
+    puede repetirse aunque el esquema siga creciendo.
+
+    Corre ANTES de los ALTER TABLE de `init()`: la tabla nueva ya nace con el
+    esquema completo, así que los ALTERs posteriores son no-ops sobre ella y
+    rellenan solo lo que falte en el camino que no pasa por aquí.
+    """
+    actuales = {r["name"] for r in
+                con.execute("PRAGMA table_info(accounts)").fetchall()}
+    comunes = [c for c in ACCOUNTS_COLUMN_NAMES if c in actuales]
+    perdidas = actuales - set(ACCOUNTS_COLUMN_NAMES)
+    if perdidas:
+        # No abortamos —la columna no la conoce el código— pero que se vea.
+        _log.warning("rebuild de accounts: columnas desconocidas que no se "
+                     "copian: %s", sorted(perdidas))
+    lista = ", ".join(comunes)
+    con.execute("DROP TABLE IF EXISTS accounts__new")
+    con.execute(_ddl_accounts("accounts__new"))
+    con.execute(f"INSERT INTO accounts__new ({lista}) "
+                f"SELECT {lista} FROM accounts")
+    con.execute("DROP TABLE accounts")
+    con.execute("ALTER TABLE accounts__new RENAME TO accounts")
+    _log.info("accounts recreada sin UNIQUE; columnas preservadas: %s",
+              len(comunes))
 
 
 @contextmanager
@@ -178,7 +234,21 @@ def init():
         # 1) Tablas (CREATE IF NOT EXISTS): respeta DBs viejas sin tocarlas.
         con.executescript(SCHEMA_TABLES)
 
-        # 2) Migración idempotente de columnas que falten en DBs viejas.
+        # 2) Si la tabla aún tiene UNIQUE(platform, identifier) heredada, la
+        # recreamos sin esa constraint (colapsaba hallazgos distintos).
+        #
+        # Va ANTES de los ALTER TABLE del paso 3, y el orden importa: la tabla
+        # nueva nace con el esquema completo, así que el paso 3 no tiene nada
+        # que añadirle. Cuando el rebuild iba DESPUÉS, copiaba una lista de
+        # columnas escrita a mano que se había quedado corta y tiraba
+        # `sent_at`, `deletion_eta` y `deletion_started_at` — justo los campos
+        # que los ALTERs acababan de crear. Ahora la copia es dinámica (ver
+        # `_rebuild_sin_unique`), así que el orden es defensa en profundidad y
+        # no la única barrera.
+        if _tiene_unique_legacy(con):
+            _rebuild_sin_unique(con)
+
+        # 3) Migración idempotente de columnas que falten en DBs viejas.
         cols = {r["name"] for r in con.execute("PRAGMA table_info(accounts)").fetchall()}
         if "recipe_hash" not in cols:
             con.execute("ALTER TABLE accounts ADD COLUMN recipe_hash TEXT")
@@ -198,18 +268,21 @@ def init():
             con.execute("ALTER TABLE accounts ADD COLUMN deletion_eta REAL")
         if "deletion_started_at" not in cols:
             con.execute("ALTER TABLE accounts ADD COLUMN deletion_started_at REAL")
-
-        # 3) Si la tabla aún tiene UNIQUE(platform, identifier) heredada, la
-        # recreamos sin esa constraint (causaba colapso de hallazgos).
-        ddl_row = con.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='accounts'"
-        ).fetchone()
-        ddl = (ddl_row["sql"] if ddl_row else "") or ""
-        if "UNIQUE" in ddl.upper() and "platform" in ddl.lower():
-            con.executescript(_REBUILD_WITHOUT_UNIQUE)
+        if "verifiability" not in cols:
+            con.execute("ALTER TABLE accounts ADD COLUMN verifiability TEXT")
 
         # 4) Índices al final: aquí ya estamos seguros de que source_site existe.
         con.executescript(SCHEMA_INDEXES)
+
+
+# --- Verificabilidad (eje separado de la confianza) -------------------------
+# Valores que puede tomar `accounts.verifiability`. El "no evaluado" es NULL a
+# propósito: es lo que deja la migración en las filas viejas y lo que tiene una
+# fila que el canario todavía no ha mirado (holehe/hibp nunca lo hacen, porque
+# no traen `profile_url`). Un `indeterminado` NO es lo mismo: ahí sí probamos y
+# no pudimos concluir.
+VERIFICABILIDAD = ("indiscriminado", "discrimina", "indeterminado")
+VERIFICABILIDAD_NO_EVALUADA = None
 
 
 # --- Motivos de confianza ---------------------------------------------------

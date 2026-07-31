@@ -268,7 +268,7 @@ Flujo típico:
    esa confianza: por qué subió o bajó. Por ejemplo *"username corto"*,
    *"coincide en la ruta"*, *"coincide en subdominio"*, *"email + username"*
    (dos fuentes independientes vieron el mismo sitio), *"2 buscadores"*,
-   *"brecha de datos"*, *"el sitio responde a cualquiera"*. Pasa el ratón por
+   *"brecha de datos"*. Pasa el ratón por
    encima para la explicación completa. Los chips solo aparecen mientras la
    cuenta no esté confirmada como tuya, que es cuando sirven. Con eso puedes
    usar **Descartar low** en lote sin miedo.
@@ -276,6 +276,16 @@ Flujo típico:
    El enlace **perfil** de cada fila es la URL del hallazgo, la misma sobre la
    que se calcularon esos chips. Si el resolver además encontró la página de
    baja, va aparte como **cómo darse de baja**.
+
+   **Confianza y verificabilidad son cosas distintas.** Aparte de la confianza,
+   una fila puede llevar la etiqueta **No verificable**: significa que ese
+   sitio responde igual a cualquier usuario inventado, así que su respuesta no
+   sirve para comprobar nada. **No significa que la cuenta no sea tuya** — es
+   una afirmación sobre el sitio, no sobre ti. Por eso no baja la confianza y
+   **"Descartar low" no las barre**: tienen su propia pestaña, *No
+   verificables*, para que las revises tú. También verás *"el sitio nos
+   bloquea"* (nos devolvió 403/429: está en pie pero nos rechaza) frente a *"el
+   sitio no respondió"* (caído o inalcanzable), que son situaciones distintas.
 3. Para cada cuenta confirmada: **Eliminar**, **Anonimizar** o **Conservar**.
    Las profesionales (`tiktok`, `instagram`, `linkedin`, `github`) salen como
    conservadas por defecto.
@@ -291,21 +301,36 @@ Tareas sin abrir UI (debug, scripts, automatización):
 ./rastrillo.sh list [--status STATUS]                      # lista la DB
 ./rastrillo.sh report --format json|csv|pdf --out FILE     # exporta informe
 ./rastrillo.sh canario https://sitio.com/u/je7remy         # ¿el sitio verifica usuarios?
+./rastrillo.sh reparar-confianza [--aplicar]               # mantenimiento de un solo uso
 ```
 
 `canario` es el helper de debug del canario a nivel de sitio: pregunta al sitio
-por dos usernames inventados y te enseña la evidencia cruda (status de cada
-uno, marcadores de "no existe", similitud entre los cuerpos, veredicto y por
-qué). **No toca la DB ni la caché de veredictos.** Acepta también un host pelado
-(`./rastrillo.sh canario baby.ru`) y `--user` para decirle qué identificador
-sustituir. Ejemplo real:
+por dos usernames inventados y te enseña la evidencia cruda (qué URL sondeó y
+por qué, status de cada uno, marcadores de "no existe", similitud entre los
+cuerpos, veredicto y por qué). **No toca la DB ni la caché de veredictos.**
+Acepta también un host pelado (`./rastrillo.sh canario baby.ru`) y `--user`
+para decirle qué identificador sustituir. Ejemplo real:
 
 ```
-→ https://cavalier.hudsonrock.com/api/...?username=nwglmttgy    status=200
-→ https://cavalier.hudsonrock.com/api/...?username=onchim6bp7z1 status=200
-  similitud entre los dos cuerpos: 100.0% (umbral 95%)
-  VEREDICTO: indiscriminado
+catálogo de sherlock: 'Duolingo' (plantilla: urlProbe)
+sondeo la URL de PROBE, no la de perfil: https://www.duolingo.com/2017-06-30/users?username=je7remy
+→ .../users?username=rpd0wssc92     status=200  marcadores: sherlock:{"users":[]}
+→ .../users?username=gi0qlgpjt62yd  status=200  marcadores: sherlock:{"users":[]}
+  VEREDICTO: discrimina
 ```
+
+Cuando un sitio nos bloquea, lo dice en vez de confundirlo con una caída:
+
+```
+→ https://www.baby.ru/u/tbzx6y4q5na0
+    ERROR: el sitio bloquea a Rastrillo (403/429)  [causa: bloqueado]
+  VEREDICTO: indeterminado (bloqueado)
+```
+
+`reparar-confianza` es mantenimiento de un solo uso: devuelve a su nivel las
+cuentas que una versión anterior bajó a `low` por ser inverificables (hoy eso
+ya no baja la confianza). Sin `--aplicar` solo te enseña qué haría; con él,
+hace una copia de seguridad de la base antes de escribir.
 
 (En Windows sustituye `./rastrillo.sh` por `.\rastrillo.ps1`.)
 

@@ -13,6 +13,8 @@ Modos:
                                            genera el informe completo a fichero
   rastrillo canario URL|HOST [--user U]    (debug) ¿este sitio sabe decir que un
                                            usuario no existe? Vuelca la evidencia
+  rastrillo reparar-confianza [--aplicar]  (un solo uso) restaura el tramo de las
+                                           filas que el canario de 2B bajó a `low`
   rastrillo run                            (debug) procesa la cola desde terminal
 
 INVARIANTE: el modo CLI **NO** ejecuta acciones destructivas headless.
@@ -208,16 +210,37 @@ def cmd_canario(args):
             print("error: el canario usa exactamente 2 tokens", file=sys.stderr)
             return 2
 
+    # Misma resolución de plantilla que usa el pase real: si el catálogo de
+    # sherlock define `urlProbe` para este sitio, sondeamos ESA. Sin esto el
+    # debug mediría algo distinto de lo que mide el escaneo.
+    from rastrillo import catalogo
+    sonda = catalogo.plantilla_sonda(url, ident)
+
     print(f"Canario sobre {url}")
     print(f"  identificador que sustituyo: {ident!r}")
-    res = canario.analizar_sitio(url, ident, tokens=tokens)
+    if sonda["sitio"]:
+        print(f"  catálogo de sherlock: {sonda['sitio']!r} "
+              f"(plantilla: {sonda['origen']})")
+        if sonda["origen"] == "urlProbe":
+            print(f"  sondeo la URL de PROBE, no la de perfil: {sonda['url']}")
+        if sonda["marcadores"]:
+            print(f"  marcadores del catálogo: {sonda['marcadores']}")
+    else:
+        print("  catálogo de sherlock: sin entrada para esta URL "
+              "(maigret, sitio retirado, o sherlock no instalado)")
+    res = canario.analizar_sitio(sonda["url"] or url, ident, tokens=tokens,
+                                 marcadores_extra=sonda["marcadores"])
     ev = res.get("evidencia") or {}
     print(f"  usernames falsos: {', '.join(res.get('tokens') or []) or '-'}")
     print()
     for s in ev.get("sondas") or []:
         print(f"  → {s.get('url')}")
         if s.get("error"):
-            print(f"      ERROR: {s['error']}")
+            # Un bloqueo (403/429) y una caída de red no son lo mismo: el
+            # primero significa que el sitio está en pie y nos rechaza.
+            causa = s.get("causa")
+            print(f"      ERROR: {s['error']}"
+                  + (f"  [causa: {causa}]" if causa else ""))
             continue
         print(f"      status={s.get('status')}  bytes={s.get('bytes')}")
         marc = s.get("marcadores") or []
@@ -230,10 +253,38 @@ def cmd_canario(args):
     print(f"  similitud entre los dos cuerpos: "
           f"{f'{sim:.1%}' if sim is not None else '(no calculada)'} "
           f"(umbral {canario.UMBRAL_SIMILITUD:.0%})")
-    print(f"  VEREDICTO: {res.get('veredicto')}")
+    print(f"  VEREDICTO: {res.get('veredicto')}"
+          + (f" ({ev['causa']})" if ev.get("causa") else ""))
     print(f"  porque: {ev.get('motivo')}")
     print()
     print("  (modo debug: no se ha tocado la DB ni la caché de veredictos)")
+    return 0
+
+
+# ── reparar-confianza: deshace el daño del canario del paso 2B ──────────────
+def cmd_reparar_confianza(args):
+    """Devuelve a su tramo las filas que el canario del paso 2B bajó a `low`.
+
+    De un solo uso e idempotente. Sin `--aplicar` solo enseña el plan y no
+    escribe nada; ver `canario.reparar_confianza_2b` para el porqué y para el
+    criterio con el que se reconstruye el tramo.
+    """
+    from rastrillo import canario, db
+
+    db.init()
+    res = canario.reparar_confianza_2b(aplicar=bool(args.aplicar))
+    if not res["filas"]:
+        print("No hay filas que reparar: ninguna está en `low` por el canario.")
+        return 0
+    print(f"Filas afectadas: {res['filas']}")
+    for p in res["plan"]:
+        print(f"  #{p['id']:<4} {p['site']:<28} {p['identifier']:<24} "
+              f"{p['de']} -> {p['a']}")
+        print(f"        motivos: {', '.join(p['motivos'])}")
+    if res["aplicado"]:
+        print("\nAplicado. Se hizo un snapshot de la DB en ~/.rastrillo/backups/ antes.")
+    else:
+        print("\n(simulación: no se ha escrito nada; repite con --aplicar)")
     return 0
 
 
@@ -296,6 +347,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="(opcional) fija los usernames falsos en vez de generarlos; "
              "repite la opción, exactamente 2")
     sc2.set_defaults(func=cmd_canario)
+
+    srep = sub.add_parser("reparar-confianza",
+        help="(un solo uso) restaura el tramo de las filas que el canario "
+             "del paso 2B bajó a `low`")
+    srep.add_argument("--aplicar", action="store_true",
+        help="escribe los cambios (sin esta opción solo enseña el plan). "
+             "Hace un snapshot de la DB antes de tocar nada")
+    srep.set_defaults(func=cmd_reparar_confianza)
 
     srun = sub.add_parser("run",
         help="(debug) procesa la cola desde terminal sin abrir UI")

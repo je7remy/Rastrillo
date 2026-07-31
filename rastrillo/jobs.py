@@ -236,8 +236,9 @@ def scan_async(usernames, emails) -> None:
             # `profile_url` todavía es la URL del hit, que es la plantilla que
             # el canario necesita; y así el auto-resolver no gasta peticiones
             # planificando el borrado de sitios recién invalidados.
-            # No aborta el escaneo: un fallo aquí solo deja la confianza como
-            # estaba (ver canario.run_canario).
+            # No aborta el escaneo: un fallo aquí solo deja `verifiability`
+            # sin rellenar (ver canario.run_canario). La confianza no depende
+            # del canario en ningún caso.
             with _lock:
                 _scan_status["phase"] = "canario"
             try:

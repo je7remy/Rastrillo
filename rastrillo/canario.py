@@ -31,18 +31,39 @@ Tres consecuencias de comparar canarios entre sí y no contra el perfil real:
      detección de "no existe" es por mensaje y no por status: si el sitio nos
      está diciendo que el falso no existe, es que discrimina bien.
 
-Reglas de aplicación (`aplicar_veredictos`):
+EL INVARIANTE (Paso 2C, Entrega 1): **el canario no modifica `confidence` en
+ninguna circunstancia.** Informa, no decide.
 
-  - `indiscriminado` BAJA a `low` las filas HEURÍSTICAS de ese sitio
-    (sherlock, maigret) y anota el motivo en todas, de modo que "Descartar
-    dudosas" (`discard-low`) las recoja sin tocar su lógica. Nada se marca
-    `not_mine` automáticamente. Las fuentes de confianza POLÍTICA (holehe
-    `high`, hibp `medium`) reciben el motivo pero no cambian de tramo: misma
-    línea que trazó el paso 2A, y ver `_aplicar_a_fila` para el porqué.
-  - `discrimina` NO sube nada. El canario solo puede penalizar; el techo de
-    confianza lo siguen fijando `discovery._register` y la corroboración.
-  - `indeterminado` no penaliza, no anota y NO se cachea (para reintentar en
-    el próximo escaneo).
+Hasta 2B, un `indiscriminado` bajaba la fila a `low`. Eso metía dos conceptos
+distintos en la misma variable: `low` significa "evidencia débil de que esta
+cuenta sea tuya", mientras que `indiscriminado` significa "la respuesta de este
+sitio no vale nada, no puedo verificar ni a favor ni en contra". Como
+`discard-low` marca `not_mine`, la cadena quedaba en **inverificable → low →
+descartar → "no es mía"**: una afirmación sobre la PROPIEDAD de la cuenta
+derivada de una señal que no habla de propiedad. En una herramienta que borra
+cuentas eso puede hacerte marcar como ajena una cuenta que sí es tuya (pasó con
+Steam y Duolingo, dos sitios donde el dueño sí podía tener cuenta).
+
+Hoy el veredicto vive en su propia columna, `accounts.verifiability`, y
+`confidence` vuelve a depender SOLO de `discovery._register` más la
+corroboración de 2A.
+
+Reglas de aplicación (`_aplicar_a_fila`):
+
+  - El veredicto se escribe en `verifiability` para TODAS las filas del sitio:
+    describe al SITIO, así que es cierto para cualquier fila suya (mismo
+    criterio que `corrob_cruzada` en `_corroborar_entre_fuentes`).
+  - El motivo se sigue anotando en `confidence_reasons` porque es evidencia
+    útil en el triage, pero **no mueve el tramo**.
+  - `discard-low` sigue barriendo por `confidence=='low'` y por tanto ya NO
+    recoge inverificables. Nada se marca `not_mine` automáticamente.
+  - `indeterminado` NO se cachea (se reintenta en el próximo escaneo), pero sí
+    se registra en `verifiability`: "lo intenté y no pude concluir" es distinto
+    de "no lo he mirado" (que es NULL). Cuando sabemos POR QUÉ no concluimos
+    —el sitio nos bloquea (403/429) frente a no hubo respuesta— también se
+    anota (Entrega 3): son dos situaciones distintas y el informe tiene que
+    poder decir cuál fue. Nos identificamos honestamente y aceptamos el
+    rechazo; no cambiamos cabeceras ni intentamos esquivar el bloqueo.
 
 Alcance y red:
 
@@ -79,11 +100,6 @@ import urllib.parse
 from typing import Optional
 
 from . import config, db
-# Fuente única de verdad de qué confianzas son ESTIMACIÓN y cuáles POLÍTICA.
-# La fijó el paso 2A y el canario se rige por la misma línea (ver
-# `_aplicar_a_fila`). Importar de `discovery` no cierra ciclo: `discovery` no
-# sabe nada de este módulo.
-from .discovery import _FUENTES_HEURISTICAS
 
 log = logging.getLogger("rastrillo.canario")
 
@@ -130,47 +146,65 @@ def _workers() -> int:
 # Los 6 idiomas que ya soporta el proyecto (en, es, ru, pt-BR, fr, de). Se
 # buscan en el cuerpo en minúsculas; basta uno para concluir que el sitio SÍ
 # sabe decir que no existe.
+#
+# La familia "could not be found" (2C, Entrega 2) entró de un escaneo real:
+# Steam responde 200 con `<h3>The specified profile could not be found.</h3>` y
+# ninguna de las frases anteriores casaba, porque todas asumían "not found"
+# contiguo. El sitio SÍ discrimina y lo dábamos por indiscriminado. Se añade en
+# los 6 idiomas por simetría con el resto de la tabla.
 _MARCADORES_NO_EXISTE = {
     "en": [
         "user not found", "page not found", "profile not found",
         "account not found", "no such user", "user does not exist",
         "doesn't exist", "does not exist", "sorry, this page isn",
         "nobody on", "not found on", "404 not found",
+        "could not be found", "couldn't be found",
     ],
     "es": [
         "usuario no encontrado", "no se ha encontrado", "no se encontr",
         "no existe", "página no encontrada", "pagina no encontrada",
         "perfil no encontrado", "usuario no existe",
+        "no se ha podido encontrar", "no pudimos encontrar",
     ],
     "ru": [
         "пользователь не найден", "страница не найдена", "не существует",
-        "не найден", "ничего не найдено",
+        "не найден", "ничего не найдено", "не удалось найти",
     ],
     "pt-BR": [
         "usuário não encontrado", "usuario nao encontrado",
         "página não encontrada", "pagina nao encontrada", "não existe",
-        "nao existe", "não encontrado",
+        "nao existe", "não encontrado", "não foi possível encontrar",
     ],
     "fr": [
         "utilisateur introuvable", "page introuvable", "n'existe pas",
         "compte introuvable", "aucun utilisateur",
+        "impossible de trouver",
     ],
     "de": [
         "benutzer nicht gefunden", "seite nicht gefunden", "existiert nicht",
-        "nicht gefunden", "kein benutzer",
+        "nicht gefunden", "kein benutzer", "konnte nicht gefunden werden",
     ],
 }
 
 
-def _marcadores_en(cuerpo: str) -> list:
+def _marcadores_en(cuerpo: str, extra=None) -> list:
     """Marcadores de "no existe" presentes en el cuerpo. Lista de
-    `"idioma:frase"` para que la evidencia sea legible."""
+    `"idioma:frase"` para que la evidencia sea legible.
+
+    `extra` son los marcadores que declara el catálogo de Sherlock para ESE
+    sitio (`catalogo.marcadores`). Van etiquetados como `sherlock:` porque son
+    de otra naturaleza: no son una heurística multi-idioma nuestra, es el texto
+    exacto contra el que Sherlock decidió que el usuario no existía.
+    """
     if not cuerpo:
         return []
     bajo = cuerpo.lower()
-    return [f"{lang}:{frase}"
-            for lang, frases in _MARCADORES_NO_EXISTE.items()
-            for frase in frases if frase in bajo]
+    hallados = [f"sherlock:{frase}" for frase in (extra or [])
+                if frase and frase.lower() in bajo]
+    hallados += [f"{lang}:{frase}"
+                 for lang, frases in _MARCADORES_NO_EXISTE.items()
+                 for frase in frases if frase in bajo]
+    return hallados
 
 
 # --- Tokens falsos ----------------------------------------------------------
@@ -274,10 +308,50 @@ def similitud(cuerpo_a: str, cuerpo_b: str, tokens=()) -> float:
 
 # --- Análisis de UN sitio ---------------------------------------------------
 def _http_get_por_defecto(url: str):
-    """GET real. Import diferido para no arrastrar `resolver` (y con él
-    `ai_assist`) cuando el canario se usa desde tests o desde el CLI."""
+    """GET real, en forma DETALLADA `(resultado, motivo)`.
+
+    Import diferido para no arrastrar `resolver` (y con él `ai_assist`) cuando
+    el canario se usa desde tests o desde el CLI.
+    """
     from . import resolver
-    return resolver._http_get(url)
+    return resolver._http_get_detallado(url)
+
+
+# Cómo se le explica al usuario cada motivo de fallo. Un sitio que nos rechaza
+# y un sitio caído producen los dos `indeterminado`, pero no son lo mismo y el
+# informe tiene que decir cuál fue (Paso 2C, Entrega 3).
+_MOTIVO_HUMANO = {
+    "bloqueado": "el sitio bloquea a Rastrillo (403/429)",
+    "red": "sin respuesta (timeout, DNS o conexión)",
+    "ssrf": "URL no permitida por la guarda anti-SSRF",
+}
+
+
+def _normalizar_respuesta(r) -> tuple:
+    """Acepta las DOS formas que puede devolver la primitiva `http_get` y
+    devuelve siempre `(resultado, motivo)`.
+
+      - `(status, final_url, body)`  → forma simple, la que usan los tests y
+        cualquier `http_get` inyectado que no sepa de motivos.
+      - `(resultado_o_None, motivo)` → forma detallada de
+        `resolver._http_get_detallado`.
+      - `None` / falsy               → fallo sin motivo declarado; lo tratamos
+        como fallo de red, que es lo que era antes de la Entrega 3.
+
+    Se distinguen por la forma: la simple tiene 3 elementos y abre con un
+    status entero; la detallada tiene 2.
+    """
+    if not r:
+        return None, "red"
+    if isinstance(r, tuple) and len(r) == 3 and isinstance(r[0], int):
+        return r, None
+    if isinstance(r, (tuple, list)) and len(r) == 2:
+        resultado, motivo = r
+        if resultado:
+            return tuple(resultado), None
+        return None, (motivo or "red")
+    # Forma desconocida: no inventamos, lo tratamos como fallo de red.
+    return None, "red"
 
 
 def _url_segura_por_defecto(url: str) -> bool:
@@ -286,24 +360,31 @@ def _url_segura_por_defecto(url: str) -> bool:
 
 
 def analizar_sitio(url: str, identificador: str, tokens=None,
-                   http_get=None, url_segura=None) -> dict:
+                   http_get=None, url_segura=None, marcadores_extra=None) -> dict:
     """Corre el canario contra UN sitio. Nunca lanza.
 
     Devuelve `{veredicto, tokens, evidencia}`, donde `evidencia` lleva las dos
     URLs pedidas, su status, la similitud y los marcadores encontrados — es lo
     que imprime `rastrillo canario` para poder juzgar el mecanismo a mano.
+
+    `marcadores_extra` son los textos de "no existe" que declara el catálogo de
+    Sherlock para este sitio (`catalogo.plantilla_sonda`). Se buscan además de
+    la lista genérica multi-idioma, no en su lugar.
     """
     get = http_get or _http_get_por_defecto
     segura = url_segura or _url_segura_por_defecto
     toks = list(tokens or generar_tokens(2))
+    extra = list(marcadores_extra or [])
 
     ev = {"url_origen": url, "identificador": identificador,
-          "tokens": toks, "sondas": [], "similitud": None, "motivo": None}
+          "tokens": toks, "sondas": [], "similitud": None, "motivo": None,
+          "marcadores_catalogo": extra, "causa": None}
 
     urls = [url_canario(url, identificador, t) for t in toks]
     if not all(urls):
         ev["motivo"] = ("no puedo construir la URL del canario: el "
                         "identificador no aparece en la URL del hit")
+        ev["causa"] = "sin_plantilla"
         return {"veredicto": "indeterminado", "tokens": toks, "evidencia": ev}
 
     respuestas = []
@@ -313,24 +394,31 @@ def analizar_sitio(url: str, identificador: str, tokens=None,
         if not segura(u):
             ev["sondas"].append({"url": u, "status": None,
                                  "error": "bloqueada por la guarda de red"})
-            ev["motivo"] = "URL no permitida por la guarda anti-SSRF"
+            ev["motivo"] = _MOTIVO_HUMANO["ssrf"]
+            ev["causa"] = "ssrf"
             return {"veredicto": "indeterminado", "tokens": toks, "evidencia": ev}
         try:
-            r = get(u)
+            bruto = get(u)
         except Exception as e:
             # Un fallo no aborta el lote: este sitio queda indeterminado.
             log.info("canario(%s) excepción: %s: %s", u, type(e).__name__, e)
             ev["sondas"].append({"url": u, "status": None,
                                  "error": f"{type(e).__name__}: {e}"})
             ev["motivo"] = "excepción durante la petición"
+            ev["causa"] = "excepcion"
             return {"veredicto": "indeterminado", "tokens": toks, "evidencia": ev}
+        r, causa = _normalizar_respuesta(bruto)
         if not r:
-            ev["sondas"].append({"url": u, "status": None,
-                                 "error": "sin respuesta (timeout, 403/429 o red caída)"})
-            ev["motivo"] = "sin respuesta"
+            # Distinguir bloqueo de caída: identificarnos y ser rechazados es
+            # información válida sobre el sitio; no llegar, no lo es.
+            ev["sondas"].append({
+                "url": u, "status": None, "causa": causa,
+                "error": _MOTIVO_HUMANO.get(causa, "sin respuesta")})
+            ev["motivo"] = _MOTIVO_HUMANO.get(causa, "sin respuesta")
+            ev["causa"] = causa
             return {"veredicto": "indeterminado", "tokens": toks, "evidencia": ev}
         status, final_url, cuerpo = r
-        marcadores = _marcadores_en(cuerpo)
+        marcadores = _marcadores_en(cuerpo, extra)
         ev["sondas"].append({
             "url": u, "final_url": final_url, "status": status,
             "bytes": len(cuerpo or ""), "marcadores": marcadores,
@@ -340,6 +428,9 @@ def analizar_sitio(url: str, identificador: str, tokens=None,
     (st1, c1, m1), (st2, c2, m2) = respuestas
 
     # 1) Status de error en cualquiera de los dos: el sitio sabe decir que no.
+    #    Incluye 5xx, que estrictamente es "el sitio se rompió" y no "el
+    #    usuario no existe. Es la semántica que ya tenía y no la cambiamos
+    #    aquí; queda anotada como candidata a revisión.
     if (st1 or 0) >= 400 or (st2 or 0) >= 400:
         ev["motivo"] = f"status {st1}/{st2}: el sitio rechaza usuarios falsos"
         return {"veredicto": "discrimina", "tokens": toks, "evidencia": ev}
@@ -363,6 +454,7 @@ def analizar_sitio(url: str, identificador: str, tokens=None,
     # 4) Todo lo demás: no concluimos, y por tanto no penalizamos.
     ev["motivo"] = (f"respuestas distintas entre sí (similitud {sim:.1%}, "
                     f"status {st1}/{st2}) pero sin señal clara")
+    ev["causa"] = "sin_senal"
     return {"veredicto": "indeterminado", "tokens": toks, "evidencia": ev}
 
 
@@ -408,8 +500,8 @@ def cache_fresca(host: str, cache=None, ahora=None) -> Optional[dict]:
 _MOTIVOS = {
     "indiscriminado": {
         "code": "canario_indiscriminado",
-        "desc": ("el sitio responde igual a usuarios inventados: no puede "
-                 "confirmar que la cuenta exista"),
+        "desc": ("el sitio responde igual a usuarios inventados: no se puede "
+                 "verificar aquí (no dice nada sobre si la cuenta es tuya)"),
     },
     "discrimina": {
         "code": "canario_discrimina",
@@ -417,60 +509,159 @@ _MOTIVOS = {
     },
 }
 
+# Motivos para los `indeterminado` cuya causa sí sabemos (Paso 2C, Entrega 3).
+# Un sitio que nos bloquea y un sitio caído acababan los dos en "sin respuesta"
+# y eran indistinguibles en el informe. Se anotan como cualquier otro motivo:
+# el canario ya no mueve el tramo, así que dejar constancia no tiene coste.
+_MOTIVOS_CAUSA = {
+    "bloqueado": {
+        "code": "canario_bloqueado",
+        "desc": ("el sitio bloquea a Rastrillo (403/429): no pudimos "
+                 "comprobar nada, pero el sitio sí está en pie"),
+    },
+    "red": {
+        "code": "canario_sin_respuesta",
+        "desc": ("no hubo respuesta (timeout, DNS o conexión): puede estar "
+                 "caído o inalcanzable desde aquí"),
+    },
+}
+
 
 def _sitios_a_probar(filas) -> dict:
-    """host → URL del hit que sirve de plantilla.
+    """host → qué sondear en ese sitio.
 
     Solo filas CON `profile_url`: holehe y hibp nunca la traen, así que
     quedan fuera por construcción y no generan ni una petición. Un host con
     varios hits se prueba UNA vez (de ahí las 2 peticiones por sitio, no 2
     por fila).
+
+    La plantilla NO es necesariamente la URL del hit: si el catálogo de
+    Sherlock define `urlProbe` para ese sitio, sondeamos ESA, que es la que
+    produjo el hallazgo (ver `catalogo.plantilla_sonda`). Sondear la página de
+    perfil mientras Sherlock consulta una API mide otra cosa, y el veredicto no
+    sería comparable con el hit.
     """
+    from . import catalogo
+
     out = {}
     for row in filas:
         host = (row["source_site"] or "").strip().lower()
         url = (row["profile_url"] or "").strip()
-        if not host or not url:
+        ident = row["identifier"] or ""
+        if not host or not url or host in out:
             continue
-        out.setdefault(host, {"url": url, "identifier": row["identifier"] or ""})
+        sonda = catalogo.plantilla_sonda(url, ident)
+        out[host] = {"url": sonda["url"] or url, "identifier": ident,
+                     "marcadores": sonda["marcadores"],
+                     "origen": sonda["origen"], "sitio": sonda["sitio"]}
     return out
 
 
-def _aplicar_a_fila(row, veredicto: str) -> bool:
-    """Anota el motivo y, si procede, baja el tramo. Devuelve True si bajó.
+def _aplicar_a_fila(row, veredicto: str, causa=None) -> bool:
+    """Escribe la VERIFICABILIDAD de la fila y anota el motivo. Nunca toca
+    `confidence`. Devuelve True si la verificabilidad cambió.
 
-    Dos límites, y son los mismos que fijó el paso 2A:
+    Este es el punto donde vive el invariante de la Entrega 1, así que conviene
+    decirlo sin rodeos: **`confidence` no aparece en `campos` en ninguna rama**,
+    ni para subir ni para bajar. El veredicto del canario describe si el SITIO
+    sirve para verificar; la probabilidad de que la cuenta sea del usuario la
+    siguen fijando `discovery._register` y la corroboración de 2A, que son las
+    únicas que miran el identificador.
 
-    1. El canario NUNCA sube la confianza. `discrimina` solo deja constancia;
-       bajar a `low` ante un `indiscriminado` es la ÚNICA vía por la que este
-       módulo toca `confidence`. Tampoco hay tramo intermedio de castigo: el
-       veredicto invalida el hit entero, no lo debilita a medias.
-
-    2. Solo se degradan las fuentes HEURÍSTICAS (`sherlock`, `maigret`). La
-       señal ajusta estimaciones, nunca políticas: el `high` de holehe no es
-       una estimación sobre la página de perfil sino una política basada en
-       que el email es identificador único —y holehe ni siquiera consulta esa
-       página, usa flujos de recuperación—, así que el veredicto del canario
-       no es evidencia sobre esa fila. Igual con el `medium` de hibp. El
-       motivo sí se anota en todas: describe al SITIO, es cierto para
-       cualquier fila suya, y así el triage ve el contexto completo (mismo
-       criterio que `corrob_cruzada` en `_corroborar_entre_fuentes`).
+    Por eso tampoco hace falta ya distinguir fuentes heurísticas de fuentes de
+    confianza política (holehe `high`, hibp `medium`): esa distinción existía
+    para decidir A QUIÉN degradar, y aquí no se degrada a nadie. El veredicto se
+    escribe en todas las filas del sitio porque es una propiedad del sitio.
     """
-    motivo = _MOTIVOS.get(veredicto)
-    if not motivo:
-        return False
-    motivos = db.merge_reasons(db.parse_reasons(row["confidence_reasons"]),
-                              [dict(motivo)])
-    campos = {"confidence_reasons": db.dump_reasons(motivos)}
-    bajo = False
-    fuente = (row["source"] or "").strip()
-    if (veredicto == "indiscriminado"
-            and fuente in _FUENTES_HEURISTICAS
-            and (row["confidence"] or "") != "low"):
-        campos["confidence"] = "low"
-        bajo = True
+    campos = {"verifiability": veredicto}
+    # `causa` solo llega con `indeterminado` y solo cuando sabemos por qué
+    # (bloqueo vs. red). Anotarla es lo que permite que el informe diga qué
+    # midió en vez de un "sin respuesta" que valía para todo.
+    motivo = _MOTIVOS.get(veredicto) or _MOTIVOS_CAUSA.get(causa or "")
+    if motivo:
+        motivos = db.merge_reasons(db.parse_reasons(row["confidence_reasons"]),
+                                   [dict(motivo)])
+        campos["confidence_reasons"] = db.dump_reasons(motivos)
+    cambio = (row["verifiability"] or None) != veredicto
     db.update_account(row["id"], **campos)
-    return bajo
+    return cambio
+
+
+# --- Reparación de un solo uso (daño del paso 2B) ---------------------------
+# Tramo BASE que implica cada motivo de `discovery._sherlock_confidence`. No es
+# una escala nueva: es la misma, leída al revés. Si alguna vez cambia allí,
+# cambia aquí — por eso el test la fija contra la función real.
+_TRAMO_POR_MOTIVO = {
+    "tramo_distintivo": "high",
+    "tramo_corto": "medium",
+    "tramo_muy_corto": "low",
+    "id_vacio": "low",
+}
+# Motivos que suben un tramo sobre la base. `corrob_misma_fila` NO está aquí a
+# propósito: dos buscadores de username con catálogos que se solapan no son
+# señal independiente (ver `db.upsert_account`).
+_MOTIVOS_QUE_SUBEN = ("bump_path", "bump_subdominio", "corrob_cruzada")
+
+
+def reparar_confianza_2b(aplicar: bool = False) -> dict:
+    """Devuelve a su tramo las filas que el paso 2B bajó a `low` por el canario.
+
+    Por qué hace falta. Hasta 2B un `indiscriminado` escribía `confidence='low'`
+    sin guardar en ningún sitio el tramo anterior. Y un reescaneo NO lo
+    recupera: `db.upsert_account` hace `return row["id"]` en cuanto la fila
+    existe, así que el `confidence` que calcula `discovery._register` para un
+    hit repetido **nunca llega a escribirse**.
+
+    Cómo lo recupera sin red. El tramo es reconstruible de forma determinista a
+    partir de los motivos que sí se persistieron: la escala base sale de
+    `_TRAMO_POR_MOTIVO` y los bumps de `_MOTIVOS_QUE_SUBEN`, que son la misma
+    escala de `discovery._sherlock_confidence` leída al revés.
+
+    Alcance deliberadamente estrecho — solo toca filas que cumplan las tres:
+      1. `confidence == 'low'`,
+      2. llevan el motivo `canario_indiscriminado`,
+      3. su fuente es heurística (sherlock/maigret), que son las únicas que 2B
+         llegó a degradar.
+    Eso la hace idempotente: tras la primera pasada ninguna fila cumple (1).
+
+    Por defecto NO escribe: devuelve el plan (`aplicar=False`). Con
+    `aplicar=True` hace `snapshot_db()` primero y luego actualiza. El motivo
+    del canario se CONSERVA: sigue siendo evidencia válida, simplemente ya no
+    mueve el tramo.
+    """
+    from .discovery import _FUENTES_HEURISTICAS, _subir_tramo
+
+    plan = []
+    for row in db.list_accounts():
+        if (row["confidence"] or "") != "low":
+            continue
+        if (row["source"] or "").strip() not in _FUENTES_HEURISTICAS:
+            continue
+        codes = [m.get("code") for m in db.parse_reasons(row["confidence_reasons"])]
+        if "canario_indiscriminado" not in codes:
+            continue
+        base = next((_TRAMO_POR_MOTIVO[c] for c in codes
+                     if c in _TRAMO_POR_MOTIVO), None)
+        if base is None:
+            # Sin motivo de tramo base no hay nada que reconstruir: la dejamos
+            # como está en vez de inventarle una confianza.
+            continue
+        for c in codes:
+            if c in _MOTIVOS_QUE_SUBEN:
+                base = _subir_tramo(base)
+        if base == "low":
+            continue
+        plan.append({"id": row["id"], "site": row["source_site"],
+                     "identifier": row["identifier"],
+                     "de": "low", "a": base, "motivos": codes})
+
+    if aplicar and plan:
+        db.snapshot_db()
+        for p in plan:
+            db.update_account(p["id"], confidence=p["a"])
+            db.log(p["id"], "info",
+                   f"confianza restaurada a {p['a']} (el canario ya no degrada)")
+    return {"aplicado": bool(aplicar), "filas": len(plan), "plan": plan}
 
 
 def run_canario(http_get=None, url_segura=None, tokens=None,
@@ -482,16 +673,18 @@ def run_canario(http_get=None, url_segura=None, tokens=None,
     sitios que el canario acaba de invalidar, y `profile_url` todavía es la
     URL del hit, que es la plantilla que necesitamos.
 
-    Devuelve `{sitios, cacheados, probados, indiscriminados, degradadas,
-    errores, veredictos}`.
+    Devuelve `{sitios, cacheados, probados, indiscriminados, marcadas,
+    errores, veredictos}`. `marcadas` cuenta filas cuya VERIFICABILIDAD cambió
+    (antes se llamaba `degradadas` y contaba caídas de tramo; ya no se degrada
+    nada, ver `_aplicar_a_fila`).
     """
     import concurrent.futures
 
     filas = list(db.list_accounts())
     sitios = _sitios_a_probar(filas)
     resumen = {"sitios": len(sitios), "cacheados": 0, "probados": 0,
-               "indiscriminados": 0, "degradadas": 0, "errores": [],
-               "veredictos": {}}
+               "indiscriminados": 0, "bloqueados": 0, "marcadas": 0,
+               "errores": [], "veredictos": {}, "causas": {}}
     if not sitios:
         return resumen
 
@@ -508,9 +701,10 @@ def run_canario(http_get=None, url_segura=None, tokens=None,
     def _probar(item):
         host, info = item
         try:
-            return host, analizar_sitio(info["url"], info["identifier"],
-                                        tokens=tokens, http_get=http_get,
-                                        url_segura=url_segura)
+            return host, analizar_sitio(
+                info["url"], info["identifier"], tokens=tokens,
+                http_get=http_get, url_segura=url_segura,
+                marcadores_extra=info.get("marcadores"))
         except Exception as e:                       # cinturón y tirantes
             log.exception("canario(%s) falló", host)
             return host, {"veredicto": "indeterminado", "tokens": [],
@@ -523,11 +717,14 @@ def run_canario(http_get=None, url_segura=None, tokens=None,
             for host, res in pool.map(_probar, list(pendientes.items())):
                 resumen["probados"] += 1
                 resumen["veredictos"][host] = res["veredicto"]
+                ev = res.get("evidencia") or {}
                 if res["veredicto"] == "indeterminado":
-                    # No se cachea: reintentamos en el próximo escaneo.
+                    # NO se cachea, ni el bloqueo ni el fallo de red: los dos
+                    # se reintentan en el próximo escaneo.
+                    resumen["causas"][host] = ev.get("causa")
                     resumen["errores"].append(
-                        {"host": host,
-                         "error": (res.get("evidencia") or {}).get("motivo")})
+                        {"host": host, "causa": ev.get("causa"),
+                         "error": ev.get("motivo")})
                     continue
                 cache[host] = {"veredicto": res["veredicto"],
                                "fecha": time.time(),
@@ -538,20 +735,27 @@ def run_canario(http_get=None, url_segura=None, tokens=None,
     for row in filas:
         host = (row["source_site"] or "").strip().lower()
         veredicto = resumen["veredictos"].get(host)
-        if veredicto in ("indiscriminado", "discrimina"):
-            if _aplicar_a_fila(row, veredicto):
-                resumen["degradadas"] += 1
+        # Los tres veredictos se registran: `indeterminado` no se cachea, pero
+        # "lo intenté y no pude concluir" sigue siendo información distinta de
+        # "no lo he mirado" (NULL), y el triage la quiere ver.
+        if veredicto in VEREDICTOS:
+            if _aplicar_a_fila(row, veredicto, resumen["causas"].get(host)):
+                resumen["marcadas"] += 1
     resumen["indiscriminados"] = sum(
         1 for v in resumen["veredictos"].values() if v == "indiscriminado")
+    resumen["bloqueados"] = sum(
+        1 for c in resumen["causas"].values() if c == "bloqueado")
 
     log.info("canario: %s sitios (%s cacheados, %s probados) | "
-             "%s indiscriminados | %s filas degradadas | %s errores",
+             "%s indiscriminados | %s nos bloquean | %s filas marcadas | "
+             "%s sin veredicto",
              resumen["sitios"], resumen["cacheados"], resumen["probados"],
-             resumen["indiscriminados"], resumen["degradadas"],
-             len(resumen["errores"]))
+             resumen["indiscriminados"], resumen["bloqueados"],
+             resumen["marcadas"], len(resumen["errores"]))
     print(f"[canario] sitios {resumen['sitios']} "
           f"(cache {resumen['cacheados']}, red {resumen['probados']}) | "
           f"indiscriminados {resumen['indiscriminados']} | "
-          f"filas a low {resumen['degradadas']} | "
-          f"errores {len(resumen['errores'])}")
+          f"nos bloquean {resumen['bloqueados']} | "
+          f"filas marcadas {resumen['marcadas']} | "
+          f"sin veredicto {len(resumen['errores'])}")
     return resumen

@@ -216,6 +216,55 @@ def _is_safe_url(url: str) -> bool:
     return True
 
 
+# Motivos por los que un GET no devuelve cuerpo. Existen porque `_http_get`
+# colapsa todos los fallos en `None` y así un sitio que nos RECHAZA y un sitio
+# CAÍDO se ven idénticos — el canario no podía reportar honestamente qué midió
+# (Paso 2C, Entrega 3).
+MOTIVO_BLOQUEADO = "bloqueado"     # 403/429: el sitio nos rechaza a propósito
+MOTIVO_RED = "red"                 # timeout, DNS, conexión: no hubo respuesta
+MOTIVO_SSRF = "ssrf"               # la guarda no dejó salir la petición
+
+
+def _http_get_detallado(url: str, timeout: float = _HTTP_TIMEOUT) -> tuple:
+    """Como `_http_get` pero diciendo POR QUÉ falló.
+
+    Devuelve `(resultado, motivo)`:
+      - `((status, final_url, body), None)` si hubo respuesta,
+      - `(None, MOTIVO_*)` si no la hubo.
+
+    Un 403/429 no es lo mismo que un timeout: el primero es el sitio
+    identificándonos y rechazándonos —información válida y reportable—, el
+    segundo es que no llegamos. Nos identificamos honestamente con nuestro UA y
+    aceptamos el rechazo: NO cambiamos cabeceras ni intentamos esquivarlo.
+
+    Ojo con lo que NO cambia: los códigos >= 400 que no son 403/429 (404, 500…)
+    siguen devolviéndose como respuesta con cuerpo, porque hay páginas que
+    responden 404 con información útil. Es la semántica de siempre.
+    """
+    if not _is_safe_url(url):
+        return None, MOTIVO_SSRF
+    _throttle(_host_of(url))
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
+                                                   "Accept-Language": "en,es,ru;q=0.8"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read(200_000).decode("utf-8", errors="ignore")
+            return (r.status, r.geturl(), body), None
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            log.info("GET %s -> %s (el sitio nos bloquea); sigo", url, e.code)
+            return None, MOTIVO_BLOQUEADO
+        # Algunas páginas devuelven 404 pero su body contiene info útil; lo aceptamos.
+        try:
+            body = e.read(200_000).decode("utf-8", errors="ignore")
+        except Exception:
+            body = ""
+        return (e.code, url, body), None
+    except Exception as e:
+        log.debug("GET %s fallo de transporte: %s: %s", url, type(e).__name__, e)
+        return None, MOTIVO_RED
+
+
 def _http_get(url: str, timeout: float = _HTTP_TIMEOUT) -> Optional[tuple[int, str, str]]:
     """GET sencillo con UA y captura tolerante. Devuelve (status, final_url, body)
     o None si revienta. Limitamos body a 200 KB.
@@ -226,29 +275,13 @@ def _http_get(url: str, timeout: float = _HTTP_TIMEOUT) -> Optional[tuple[int, s
 
     Anti-SSRF (Tarea 6): antes del GET filtramos por `_is_safe_url`. El
     caller no aborta el lote; simplemente recibe None y pasa al siguiente.
+
+    Es un envoltorio de `_http_get_detallado` que TIRA el motivo, y su contrato
+    no ha cambiado: los tres callers de este módulo solo distinguen "hubo
+    respuesta" de "no la hubo" y no queríamos tocarlos. Si necesitas saber por
+    qué falló (el canario lo necesita), usa `_http_get_detallado`.
     """
-    if not _is_safe_url(url):
-        return None
-    _throttle(_host_of(url))
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
-                                                   "Accept-Language": "en,es,ru;q=0.8"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read(200_000).decode("utf-8", errors="ignore")
-            return r.status, r.geturl(), body
-    except urllib.error.HTTPError as e:
-        if e.code in (403, 429):
-            log.info("GET %s -> %s (rate-limit/forbidden); sigo", url, e.code)
-            return None
-        # Algunas páginas devuelven 404 pero su body contiene info útil; lo aceptamos.
-        try:
-            body = e.read(200_000).decode("utf-8", errors="ignore")
-        except Exception:
-            body = ""
-        return e.code, url, body
-    except Exception as e:
-        log.debug("GET %s fallo: %s", url, e)
-        return None
+    return _http_get_detallado(url, timeout)[0]
 
 
 # --- Palabras clave de borrado (multi-idioma) -------------------------------

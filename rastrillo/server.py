@@ -67,6 +67,16 @@ STATUS_META = {
     "dry_run":       ("Simulada",         "#534AB7"),
 }
 
+# Verificabilidad (Paso 2C, Entrega 1): eje SEPARADO de la confianza. Dice si
+# la respuesta del sitio sirve para comprobar algo, nunca si la cuenta es del
+# usuario. La ausencia de entrada (verifiability NULL) significa "no evaluado"
+# y la UI no pinta nada: no es un juicio, es que el canario no ha mirado.
+VERIFIABILITY_META = {
+    "indiscriminado": ("No verificable",  "#854F0B"),
+    "discrimina":     ("Verificable",     "#0F6E56"),
+    "indeterminado":  ("Sin veredicto",   "#5F5E5A"),
+}
+
 # Acciones que SÍ son irreversibles. Para ellas:
 #   - se exige owned=1 en la cuenta (o confirm_owned=true en el body),
 #   - se respeta el modo dry-run,
@@ -526,7 +536,15 @@ def api_confirm_account(account_id: int):
 def api_discard_low():
     """Bulk: descarta como 'not_mine' todas las cuentas en estado 'found' con
     confidence='low' que no estén marcadas como propias. Una sola pulsación
-    barre el ruido típico de Sherlock para usernames cortos/genéricos."""
+    barre el ruido típico de Sherlock para usernames cortos/genéricos.
+
+    El criterio es `confidence=='low'` y SOLO eso (Paso 2C, Entrega 1). En
+    particular NO barre inverificables: `verifiability=='indiscriminado'` dice
+    que el sitio no sirve para comprobar nada, no que la cuenta sea ajena, y
+    encadenar lo uno con lo otro marcaba `not_mine` cuentas que sí eran del
+    usuario. Si algún día se quiere una acción en lote sobre inverificables,
+    tiene que ser otro endpoint con otro estado: `not_mine` y la pestaña
+    "Descartadas" son el mismo estado y ya significan "no es mía"."""
     n = 0
     for r in db.list_accounts(status="found"):
         if (r["confidence"] or "") == "low" and not r["owned"]:
@@ -1005,7 +1023,7 @@ def _boot_script() -> str:
     aparece otro valor que el frontend necesite al arrancar, añádelo aquí
     en vez de reintroducir placeholders en el HTML estático.
     """
-    payload = {"META": STATUS_META}
+    payload = {"META": STATUS_META, "VERIF_META": VERIFIABILITY_META}
     return (
         "<script>window.__RASTRILLO_BOOT__ = "
         + json.dumps(payload)

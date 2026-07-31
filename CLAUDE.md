@@ -33,6 +33,22 @@ principalmente en Arch/Hyprland pero también corre en Windows y Mac.
    como propia.
 5. Las plataformas en `config.KEEP_PLATFORMS` (tiktok, instagram, linkedin,
    github) van siempre a `skipped`. No entran al flujo de borrado.
+6. **El canario no modifica `confidence` en ninguna circunstancia.** Confianza
+   ("¿es mía esta cuenta?") y verificabilidad ("¿sirve la respuesta de este
+   sitio para comprobar algo?") son ejes distintos y viven en columnas
+   distintas (`confidence` / `verifiability`). Mezclarlos encadenaba
+   inverificable → `low` → "Descartar dudosas" → `not_mine`, que afirma algo
+   sobre la propiedad de una cuenta a partir de una señal que no habla de
+   propiedad. `canario._aplicar_a_fila` es el único punto de escritura y no
+   toca `confidence` en ninguna rama; lo fija un test de barrido de 54 filas.
+7. **No regeneres `requirements.lock`** salvo que el usuario lo pida
+   explícitamente en ese mismo mensaje. `pip-compile` re-resuelve TODAS las
+   pins contra lo que haya en el índice en ese momento y puede revertir en
+   silencio un bump aplicado a mano — ya pasó con `pillow` (12.3.0 → 12.2.0,
+   deshaciendo 20 avisos de seguridad). El comentario de `ci.yml` que invita a
+   regenerarlo ante un CVE describe una decisión del mantenedor, no una tarea
+   que puedas tomarte por tu cuenta. Instalar DESDE el lock
+   (`pip install -r requirements.lock`) no lo modifica y es siempre correcto.
 
 ## Modelo de borrado: resolver en capas
 
@@ -63,7 +79,7 @@ con la plantilla GDPR estática en uno de los 6 idiomas soportados.
 
 `cli.py` — entrypoint. Sin argumentos arranca el dashboard, abre el
 navegador con el token en la URL y queda corriendo. Subcomandos `list`,
-`run` y `canario` son auxiliares de debug. `rastrillo canario URL|HOST
+`run`, `canario` y `reparar-confianza` son auxiliares de debug/mantenimiento. `rastrillo canario URL|HOST
 [--user U] [--token T --token T]` corre el canario contra UN sitio y vuelca
 la evidencia cruda (status de cada falso, bytes, marcadores, similitud,
 veredicto y por qué) SIN escribir en la DB ni en la caché de veredictos —
@@ -81,10 +97,24 @@ de onboarding (`is_onboarded`, `mark_onboarded`).
 `found, queued, in_progress, awaiting_user, deleted, anonymized,
 user_done, semi_auto, email_draft, pending_deletion, manual, skipped,
 failed, not_mine, dry_run`. Migraciones idempotentes (`recipe_hash`,
-`source_site`, `action_meta`, `confidence`, `confidence_reasons`, `owned`,
-`sent_at`, `deletion_eta`, `deletion_started_at`) en `init()`. La
-unicidad de cuentas se hace en código por `(source_site, identifier)` —
-NO con UNIQUE en SQL — para no colapsar Reddit y RedditGifts.
+`source_site`, `action_meta`, `confidence`, `confidence_reasons`,
+`verifiability`, `owned`, `sent_at`, `deletion_eta`, `deletion_started_at`) en
+`init()`. La unicidad de cuentas se hace en código por
+`(source_site, identifier)` — NO con UNIQUE en SQL — para no colapsar Reddit y
+RedditGifts.
+
+El esquema de `accounts` tiene UNA sola definición, `_ACCOUNTS_COLUMNS`, de la
+que `_ddl_accounts()` genera tanto el `CREATE TABLE` como la tabla temporal del
+rebuild de DBs legacy. **No lo dupliques**: antes había una copia literal
+dentro de `_REBUILD_WITHOUT_UNIQUE`, se quedó atrás y migrar una DB legacy con
+UNIQUE perdía en silencio `sent_at`, `deletion_eta` y `deletion_started_at`.
+Hoy `_rebuild_sin_unique` copia la INTERSECCIÓN calculada en runtime y corre
+ANTES de los `ALTER TABLE` (paso 2 de `init()`, no 3), de modo que la tabla
+recreada nace con el esquema completo. Si añades un `ADD COLUMN` a `init()`,
+añade también la columna a `_ACCOUNTS_COLUMNS`; hay un test que compara ambas
+listas.
+
+`confidence` y `verifiability` son ejes SEPARADOS: ver el invariante 6.
 `snapshot_db()` copia la DB a `~/.rastrillo/backups/` antes de
 `clear_accounts`.
 `profile_url` guarda la URL DEL HIT — la que produjo el descubrimiento y
@@ -164,20 +194,27 @@ el perfil real del usuario: así el veredicto es del SITIO y no del
 identificador, y no le anunciamos a nadie que miramos ese username).
 Veredictos: `indiscriminado` (dos 200, cuerpos ≥95% iguales por
 `difflib.SequenceMatcher` sobre texto normalizado, y SIN marcadores de "no
-existe" en los 6 idiomas), `discrimina` (4xx o marcador presente),
-`indeterminado` (timeout/excepción/URL no construible). Aplicación en
-`_aplicar_a_fila`: bajar a `low` ante un `indiscriminado` es la ÚNICA vía
-por la que este módulo toca `confidence`, y solo la aplica a las fuentes
-HEURÍSTICAS — reusa `discovery._FUENTES_HEURISTICAS`, no duplica la tupla.
-La señal ajusta estimaciones, nunca políticas: el `high` de holehe se basa
-en que el email es identificador único y holehe ni consulta la página de
-perfil (usa flujos de recuperación), así que el veredicto no es evidencia
-sobre esa fila; igual el `medium` de hibp. El motivo
-(`canario_indiscriminado`) sí se anota en TODAS las filas del sitio —
-describe al sitio, no a la fila—, mismo criterio que `corrob_cruzada` en
-2A. `discrimina` solo anota: **el canario nunca sube la confianza**.
-`indeterminado` no penaliza, no anota y NO se cachea. Caché por
-host en `~/.rastrillo/canario.json` con TTL
+existe"), `discrimina` (4xx o marcador presente), `indeterminado`
+(bloqueo/red/excepción/URL no construible).
+
+**El canario NO toca `confidence` (invariante 6).** El veredicto se escribe en
+`accounts.verifiability`, columna aparte, y en TODAS las filas del sitio —
+describe al sitio, no a la fila, mismo criterio que `corrob_cruzada` en 2A. Por
+eso `_aplicar_a_fila` ya no distingue fuentes heurísticas de políticas: esa
+distinción existía para decidir a quién degradar y aquí no se degrada a nadie.
+Los motivos (`canario_indiscriminado`, `canario_discrimina`,
+`canario_bloqueado`, `canario_sin_respuesta`) se siguen anotando en
+`confidence_reasons` como evidencia, pero no mueven el tramo.
+`indeterminado` NO se cachea (se reintenta), aunque sí se registra: "lo intenté
+y no pude concluir" ≠ "no lo he mirado" (NULL).
+
+Qué URL se sondea: la que produjo el hit **según Sherlock**, no siempre la
+visible. `catalogo.plantilla_sonda` decide (ver `catalogo.py`) y aporta además
+los marcadores específicos del sitio. Distinguir bloqueo de caída sale de
+`resolver._http_get_detallado`; **no se cambian cabeceras para esquivar un
+403**.
+
+Caché por host en `~/.rastrillo/canario.json` con TTL
 (`RASTRILLO_CANARIO_MAX_AGE_DAYS`, default 30), patrón de `directory.py`:
 con caché fresca, cero red. Solo filas con `profile_url`, lo que excluye
 estructuralmente holehe y hibp. **Exactamente 2 peticiones por sitio no
@@ -187,7 +224,34 @@ y timeout vía `resolver._http_get` (`RASTRILLO_PROBE_DELAY`); pool con
 `RASTRILLO_RESOLVER_WORKERS` (`_workers()` duplica cuatro líneas de
 `jobs._resolver_workers` a propósito: importar `jobs` cerraría el ciclo).
 Las dos primitivas de red (`http_get`, `url_segura`) son inyectables por
-parámetro, como en `domain_intel.py`. Debug a mano: `rastrillo canario`.
+parámetro, como en `domain_intel.py`; `http_get` acepta la forma simple
+`(status, url, body)` y la detallada `(resultado, motivo)`. Debug a mano:
+`rastrillo canario`.
+
+`reparar_confianza_2b(aplicar=False)` es un helper de UN SOLO USO que devuelve
+a su tramo las filas que el canario del paso 2B bajó a `low`. Hace falta porque
+un reescaneo NO las recupera: `db.upsert_account` hace `return row["id"]` en
+cuanto la fila existe, así que el `confidence` recalculado por `_register`
+nunca se escribe. Reconstruye el tramo sin red desde los motivos persistidos
+(`_TRAMO_POR_MOTIVO` + `_MOTIVOS_QUE_SUBEN` son la escala de
+`_sherlock_confidence` leída al revés). Expuesto como
+`rastrillo reparar-confianza [--aplicar]`.
+
+`rastrillo/catalogo.py` — lee el `data.json` de `sherlock-project` con
+`importlib.resources` (sin duplicar la tabla ni añadir dependencias) para que
+el canario mida **lo mismo que produjo el hit**. Aporta dos cosas: `urlProbe`,
+la URL de sondeo de los sitios que se comprueban contra una API en vez de
+contra la página de perfil (Duolingo, Freelancer, Chess…), y `errorMsg`, el
+texto exacto con el que Sherlock decide "no existe" (es lo que rescata a Steam
+y a HudsonRock, cuyas redacciones no estaban en la lista genérica). El
+emparejamiento fila ↔ entrada va por **forma de la URL** —sustituir el
+identificador en la plantilla y comparar— y no por nombre ni por host: el
+`display_name` puede venir de una receta, y un host puede tener dos entradas
+(`Steam Community (User)` / `(Group)`). Degrada sin romper: si no hay entrada
+(hits de **Maigret**, que trae su propio catálogo y no cubrimos; sitios
+retirados; sherlock no instalado) devuelve la URL del hit y el canario se apoya
+en la lista genérica. Los `urlProbe` que no llevan el identificador en la URL
+(Discord, Holopin) dejan el sitio en `indeterminado`, que es lo honesto.
 
 `rastrillo/directory.py` — directorio público (JustDeleteMe). Fetch
 remoto + caché + lookup por host (exacto y por sufijo para subdominios).
@@ -195,7 +259,13 @@ Fallback embebido si no hay red en el primer arranque. Refresh
 automático al arrancar si la caché supera `RASTRILLO_DIR_MAX_AGE_DAYS`
 (default 30).
 
-`rastrillo/resolver.py` — el resolver de la tabla de arriba.
+`rastrillo/resolver.py` — el resolver de la tabla de arriba. `_http_get`
+colapsa todo fallo en `None` y sus tres callers solo distinguen "hubo
+respuesta" de "no la hubo"; **ese contrato no ha cambiado**. Si necesitas saber
+POR QUÉ falló, usa `_http_get_detallado`, que devuelve `(resultado, motivo)`
+con `MOTIVO_BLOQUEADO` (403/429), `MOTIVO_RED` (timeout/DNS/conexión) o
+`MOTIVO_SSRF`. Lo usa el canario para no reportar un bloqueo como una caída.
+Códigos >= 400 que no sean 403/429 siguen volviendo como respuesta con cuerpo.
 `resolve(host, identifier)` siempre devuelve una Resolution. Throttle
 por dominio (`RASTRILLO_PROBE_DELAY`, default 1.5 s) para no parecer
 escaneo abusivo. Caché en `discovered.json`. Plantillas GDPR en 6
@@ -402,14 +472,41 @@ Archivos:
 - `tests/test_canario.py` — canario a nivel de sitio, offline con `http_get`
   y `url_segura` inyectados: los tres veredictos, el marcador de "no existe"
   que evita el falso veredicto (español y alemán), `indeterminado` que no
-  penaliza ni se cachea, la caché (fresca → cero peticiones; vencida por TTL
+  se cachea, la caché (fresca → cero peticiones; vencida por TTL
   → se repite; corrupta → no revienta), 3 hits del mismo host = 2 peticiones,
   hits sin `url` = cero peticiones, la guarda de red (`http://`, `localhost`,
-  IP privada), que `discrimina` nunca sube el tramo, que holehe/hibp/manual
-  reciben el motivo pero conservan su tramo, la plausibilidad de los tokens y
-  la construcción de la URL del canario. Cierra con un barrido de
-  (fuente × tramo × veredicto) que fija el invariante: la caída a `low` es la
-  única vía por la que el canario toca `confidence`.
+  IP privada), que `discrimina` nunca sube el tramo, la plausibilidad de los
+  tokens y la construcción de la URL del canario. Cierra con un barrido de
+  (fuente × tramo × veredicto) sobre 54 filas que fija el invariante 6:
+  **el canario nunca modifica `confidence`, en ninguna dirección**.
+- `tests/test_verificabilidad.py` — 2C Entrega 1: la columna
+  `verifiability` y su migración idempotente (incluida una DB anterior a 2C),
+  que la API la expone, que `discard-low` sigue mirando SOLO `confidence` (una
+  fila `high`+`indiscriminado` no se descarta; una `low` normal sí), que no
+  existe ningún endpoint de descarte masivo de inverificables, y la reparación
+  de un solo uso (`reparar_confianza_2b`): que el reescaneo NO recupera el
+  tramo, que sin `--aplicar` no escribe, que el tramo reconstruido coincide con
+  `discovery._sherlock_confidence`, idempotencia, ámbito y snapshot previo.
+- `tests/test_canario_calibracion.py` — 2C Entrega 2: el catálogo de sherlock
+  con un `data.json` inyectado (emparejar por forma de URL, desambiguar dos
+  entradas del mismo host, `errorMsg` string y lista, `errorType` != message,
+  basura sin reventar, plantillas con llaves literales); las redacciones nuevas
+  de marcadores una por una y que un perfil normal no las dispara; el caso
+  Duolingo (sondea `urlProbe`) y el caso Steam (misma URL, marcador nuevo); que
+  una SPA legítima sigue siendo `indiscriminado`; que Maigret degrada sin
+  romper; y un bloque de contrato contra el `data.json` REAL instalado, que
+  avisa si sherlock retira o cambia esas entradas.
+- `tests/test_bloqueo_vs_red.py` — 2C Entrega 3: `_http_get_detallado`
+  (403/429 → bloqueo; timeout/DNS/conexión → red; SSRF → su motivo; 404 y 500
+  siguen siendo respuesta con cuerpo), que `_http_get` conserva su contrato
+  viejo, que el canario reporta la causa y la anota en la fila, que ninguno de
+  los dos se cachea, y que nada de esto toca `confidence`.
+- `tests/test_rebuild_legacy.py` — 2C Entrega 4: DB legacy CON UNIQUE migra sin
+  perder `sent_at`/`deletion_eta`/`deletion_started_at` (ni ningún otro campo,
+  ni los ids); DB legacy muy vieja sin columnas nuevas; DB sin UNIQUE no se
+  reconstruye; DB nueva intacta; idempotencia sin dejar `accounts__new`; y el
+  test que evita la recaída: los `ADD COLUMN` de `init()` tienen que estar
+  todos en `_ACCOUNTS_COLUMNS`.
 - `tests/test_domain_intel.py` — Domain Intelligence offline: parseo
   WHOIS recursivo y DNS desde fixtures (primitivas de red mockeadas),
   reglas de correlación (MX→Google, NS→Cloudflare, SPF, verificaciones
@@ -417,7 +514,7 @@ Archivos:
   guard anti-SSRF del socket WHOIS, y los endpoints (401 sin token, 400
   dominio inválido, happy-path con persistencia).
 
-Alrededor de 292 tests en menos de un minuto. Antes de cualquier cambio
+Alrededor de 382 tests en poco más de un minuto. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -441,7 +538,7 @@ Eso es lo que hace `test_engine_html_local.py`.
 | `RASTRILLO_RESOLVER_WORKERS` | 5 (cap 16) | Pool del auto-resolver |
 | `RASTRILLO_PROBE_DELAY` | 1.5 | Segundos entre GETs al mismo host |
 | `RASTRILLO_DIR_MAX_AGE_DAYS` | 30 | Edad max del directorio antes de refresh auto |
-| `RASTRILLO_CANARIO_MAX_AGE_DAYS` | 30 | Edad max de un veredicto del canario antes de re-probar |
+| `RASTRILLO_CANARIO_MAX_AGE_DAYS` | 30 | Edad max de un veredicto del canario antes de re-probar (solo se cachean `indiscriminado` y `discrimina`) |
 | `RASTRILLO_SHERLOCK_TIMEOUT` | 900 | Timeout global de Sherlock |
 | `RASTRILLO_SHERLOCK_SITE_TIMEOUT` | 60 | Timeout per-site de Sherlock |
 | `RASTRILLO_HOLEHE_TIMEOUT` | 600 | Timeout global de Holehe |
@@ -463,6 +560,20 @@ HIBP-como-exposición y anti-falso-deleted.
 ## Backlog
 
 Cosas que se podrían apretar más:
+
+- **Acción en lote sobre inverificables.** Hoy hay filtro pero no acción, a
+  propósito (2C, Entrega 1: primero vivir con la señal separada). Si algún día
+  se quiere, NO puede reusar `not_mine`: ese estado y la pestaña "Descartadas"
+  son el mismo y ya significan "no es mía". Haría falta un estado nuevo, con su
+  entrada en `db.py`, `server.STATUS_META`, `app.js` (`GROUPS`, `TONE`,
+  `SHOW_MSG`) y su filtro.
+- **Cobertura del catálogo de Maigret.** `catalogo.py` solo lee el `data.json`
+  de sherlock; los hits de maigret sondean la URL visible y se apoyan en la
+  lista genérica de marcadores. Maigret trae su propio catálogo con otro
+  esquema (y es opt-in, así que puede no estar instalado).
+- **El canario da `discrimina` ante un 5xx.** `status >= 400` no distingue "el
+  usuario no existe" de "el sitio se rompió". Es la semántica previa a 2C y se
+  dejó intacta a propósito; merece revisión con evidencia.
 
 - Endurecer el bucle de IA: presupuesto explícito de tokens, screenshot
   por turno opcional.

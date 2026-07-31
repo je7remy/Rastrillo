@@ -152,11 +152,14 @@ class TestCanarioVeredictos(IsolatedTestCase):
         self.assertEqual(res["veredictos"]["sitio.com"], "indeterminado")
         self.assertEqual(self.c._leer_cache(), {},
                          "un indeterminado NO debe cachearse")
-        # Confianza intacta y sin motivo de canario.
+        # Confianza intacta. El motivo de la CAUSA sí se anota desde la
+        # Entrega 3 (aquí, fallo de red), pero nunca uno de veredicto.
         row = self.db.get_account(1)
         self.assertEqual(row["confidence"], "high")
         codes = {r["code"] for r in self.db.parse_reasons(row["confidence_reasons"])}
-        self.assertFalse({c for c in codes if c.startswith("canario_")})
+        self.assertIn("canario_sin_respuesta", codes)
+        self.assertNotIn("canario_indiscriminado", codes)
+        self.assertNotIn("canario_discrimina", codes)
 
     # --- 12. Guarda de red --------------------------------------------------
     def test_guarda_de_red_no_pide_http_ni_ips_privadas(self):
@@ -249,8 +252,8 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         row = self.db.get_account(aid)
         return {r["code"] for r in self.db.parse_reasons(row["confidence_reasons"])}
 
-    # --- 5. indiscriminado degrada las filas del sitio ---------------------
-    def test_indiscriminado_baja_las_filas_a_low(self):
+    # --- E1. indiscriminado marca verificabilidad, NO confianza ------------
+    def test_indiscriminado_marca_verificabilidad_y_deja_la_confianza(self):
         a1 = self._fila("hudsonrock", "jeremy", "cavalier.hudsonrock.com",
                         "https://cavalier.hudsonrock.com/api?username=jeremy")
         a2 = self._fila("bueno", "jeremy", "bueno.com",
@@ -265,36 +268,52 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         self.assertEqual(res["veredictos"]["cavalier.hudsonrock.com"],
                          "indiscriminado")
         self.assertEqual(res["veredictos"]["bueno.com"], "discrimina")
-        self.assertEqual(res["degradadas"], 1)
+        self.assertEqual(res["marcadas"], 2)
 
-        self.assertEqual(self.db.get_account(a1)["confidence"], "low")
-        self.assertIn("canario_indiscriminado", self._codes(a1))
-        # El que discrimina no se toca de tramo, pero sí queda anotado.
+        # El veredicto va a su propia columna...
+        self.assertEqual(self.db.get_account(a1)["verifiability"],
+                         "indiscriminado")
+        self.assertEqual(self.db.get_account(a2)["verifiability"], "discrimina")
+        # ...y la confianza NO se mueve en ninguno de los dos casos.
+        self.assertEqual(self.db.get_account(a1)["confidence"], "high")
         self.assertEqual(self.db.get_account(a2)["confidence"], "high")
+        # El motivo se sigue anotando: es evidencia, pero no mueve el tramo.
+        self.assertIn("canario_indiscriminado", self._codes(a1))
         self.assertIn("canario_discrimina", self._codes(a2))
 
-    def test_las_low_las_recoge_discard_low(self):
-        """El canario no marca nada `not_mine`: solo deja la fila en `low`
-        para que el botón de siempre la barra cuando el usuario lo pulse."""
+    def test_discard_low_no_barre_inverificables(self):
+        """La cadena "inverificable -> low -> descartar -> no es mía" es lo que
+        cierra la Entrega 1: `discard-low` sigue mirando SOLO `confidence`."""
         from .helpers import auth_client
         aid = self._fila("malo", "jeremy", "malo.com",
-                         "https://malo.com/u/jeremy")
+                         "https://malo.com/u/jeremy", conf="high")
         self._run(_Espia(_generico))
-        self.assertEqual(self.db.get_account(aid)["confidence"], "low")
-        # Sigue en `found` hasta que el usuario pulse.
-        self.assertEqual(self.db.get_account(aid)["status"], "found")
+        row = self.db.get_account(aid)
+        self.assertEqual(row["verifiability"], "indiscriminado")
+        self.assertEqual(row["confidence"], "high", "la confianza no se toca")
+
         cli = auth_client()
         r = cli.post("/api/accounts/discard-low", json={}, headers=self.hdr())
         self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["discarded"], 0,
+                         "una fila high+indiscriminado NO se descarta")
+        self.assertEqual(self.db.get_account(aid)["status"], "found")
+
+    def test_discard_low_sigue_barriendo_una_low_normal(self):
+        """El comportamiento de siempre para el ruido real de Sherlock."""
+        from .helpers import auth_client
+        aid = self._fila("corto", "ana", "corto.com",
+                         "https://corto.com/u/ana", conf="low")
+        cli = auth_client()
+        r = cli.post("/api/accounts/discard-low", json={}, headers=self.hdr())
         self.assertEqual(r.json()["discarded"], 1)
         self.assertEqual(self.db.get_account(aid)["status"], "not_mine")
 
-    # --- Solo se degradan las fuentes heurísticas --------------------------
-    def test_indiscriminado_no_toca_la_fila_de_holehe(self):
-        """La señal ajusta estimaciones, nunca políticas. El `high` de holehe
-        se basa en que el email es identificador único, y holehe ni siquiera
-        consulta la página de perfil (usa flujos de recuperación): el veredicto
-        del canario no es evidencia sobre esa fila."""
+    # --- El veredicto describe al SITIO: se marca en todas sus filas -------
+    def test_el_veredicto_se_marca_en_todas_las_filas_del_sitio(self):
+        """Incluidas las de holehe/hibp, que no aportan plantilla. Describe al
+        SITIO, así que es cierto para cualquier fila suya — mismo criterio que
+        `corrob_cruzada` en 2A. Y ninguna cambia de tramo."""
         sher = self._fila("foro", "jeremy", "foro.com",
                           "https://foro.com/u/jeremy")
         hole = self.db.upsert_account(
@@ -307,14 +326,12 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         # Una sola petición doble: la fila de holehe no aporta plantilla.
         self.assertEqual(espia.n, 2)
 
-        self.assertEqual(self.db.get_account(sher)["confidence"], "low")
-        self.assertEqual(self.db.get_account(hole)["confidence"], "high",
-                         "el tramo de holehe es política, no estimación")
-        self.assertEqual(res["degradadas"], 1, "solo la fila heurística")
-        # El motivo sí se anota en ambas: describe al SITIO, y es cierto para
-        # cualquier fila suya (mismo criterio que `corrob_cruzada` en 2A).
-        self.assertIn("canario_indiscriminado", self._codes(sher))
-        self.assertIn("canario_indiscriminado", self._codes(hole))
+        for aid in (sher, hole):
+            with self.subTest(fila=aid):
+                row = self.db.get_account(aid)
+                self.assertEqual(row["verifiability"], "indiscriminado")
+                self.assertEqual(row["confidence"], "high")
+                self.assertIn("canario_indiscriminado", self._codes(aid))
 
     def test_indiscriminado_no_toca_hibp_ni_hibp_confirmed(self):
         ids = {}
@@ -331,13 +348,15 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         for fuente, aid in ids.items():
             with self.subTest(fuente=fuente):
                 self.assertEqual(self.db.get_account(aid)["confidence"], "medium")
-        self.assertEqual(res["degradadas"], 1)
 
-    def test_maigret_si_se_degrada(self):
+    def test_maigret_tampoco_se_degrada(self):
         aid = self._fila("sitio", "jeremy", "sitio.com",
                          "https://sitio.com/u/jeremy", source="maigret")
         self._run(_Espia(_generico))
-        self.assertEqual(self.db.get_account(aid)["confidence"], "low")
+        row = self.db.get_account(aid)
+        self.assertEqual(row["confidence"], "high",
+                         "maigret era heurística y en 2B bajaba; ya no")
+        self.assertEqual(row["verifiability"], "indiscriminado")
 
     # --- 13. Nunca sube la confianza ---------------------------------------
     def test_discrimina_no_sube_una_fila_low(self):
@@ -347,8 +366,22 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         self.assertEqual(res["veredictos"]["corto.com"], "discrimina")
         self.assertEqual(self.db.get_account(aid)["confidence"], "low",
                          "el canario nunca sube el tramo")
-        self.assertEqual(res["degradadas"], 0)
         self.assertIn("canario_discrimina", self._codes(aid))
+
+    # --- indeterminado: se registra, pero no se cachea ---------------------
+    def test_indeterminado_se_registra_en_verificabilidad(self):
+        """"Lo intenté y no pude concluir" es distinto de "no lo he mirado"
+        (NULL). El veredicto se registra aunque no se cachee, y con la Entrega
+        3 se anota además la causa (aquí, fallo de red)."""
+        aid = self._fila("mudo", "jeremy", "mudo.com",
+                         "https://mudo.com/u/jeremy")
+        res = self._run(_Espia(lambda url: None))
+        self.assertEqual(res["veredictos"]["mudo.com"], "indeterminado")
+        row = self.db.get_account(aid)
+        self.assertEqual(row["verifiability"], "indeterminado")
+        self.assertEqual(row["confidence"], "high")
+        self.assertIn("canario_sin_respuesta", self._codes(aid))
+        self.assertEqual(self.c._leer_cache(), {}, "no se cachea")
 
     # --- 10. Tres hits del mismo host → 2 peticiones -----------------------
     def test_tres_hits_del_mismo_host_dos_peticiones(self):
@@ -359,8 +392,8 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         res = self._run(espia)
         self.assertEqual(res["sitios"], 1)
         self.assertEqual(espia.n, 2, "2 peticiones por SITIO, no por fila")
-        # Pero las 3 filas quedan degradadas.
-        self.assertEqual(res["degradadas"], 3)
+        # Pero las 3 filas quedan marcadas con la verificabilidad del sitio.
+        self.assertEqual(res["marcadas"], 3)
 
     # --- 11. Hits sin url (holehe, hibp) → cero peticiones -----------------
     def test_hits_sin_url_no_generan_peticiones(self):
@@ -451,12 +484,14 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         self.assertEqual(espia.n, 0)
 
     # --- El invariante, barrido entero -------------------------------------
-    def test_la_caida_a_low_es_la_unica_via_por_la_que_toca_la_confianza(self):
-        """Barrido de (fuente × tramo × veredicto): el ÚNICO cambio de
-        `confidence` admisible es `→ low`, y solo con `indiscriminado` sobre
-        sherlock/maigret. Cualquier otra combinación deja el tramo como
-        estaba."""
-        from rastrillo.discovery import _FUENTES_HEURISTICAS
+    def test_el_canario_nunca_modifica_la_confianza(self):
+        """Barrido de (fuente × tramo × veredicto): 54 filas, y en NINGUNA
+        cambia `confidence` — ni hacia arriba ni hacia abajo, para ninguna
+        fuente y ningún tramo. Lo que sí cambia es `verifiability`, que es el
+        eje nuevo de la Entrega 1.
+
+        Este es EL test del invariante: si alguien vuelve a meter una escritura
+        de `confidence` en `canario.py`, aquí se cae."""
         fuentes = ("sherlock", "maigret", "holehe", "hibp", "hibp_confirmed",
                    "manual")
         tramos = ("high", "medium", "low")
@@ -464,6 +499,9 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
         guion = {"indis.com": _generico,
                  "discri.com": lambda u: (404, u, "not found"),
                  "indeter.com": lambda u: None}
+        veredicto_de = {"indis.com": "indiscriminado",
+                        "discri.com": "discrimina",
+                        "indeter.com": "indeterminado"}
         esperado, sembradas = {}, []
         for host in guion:
             for fuente in fuentes:
@@ -474,9 +512,8 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
                         confidence=tramo, display_name=host,
                         profile_url=f"https://{host}/u/{fuente}-{tramo}")
                     sembradas.append(aid)
-                    debe_bajar = (host == "indis.com"
-                                  and fuente in _FUENTES_HEURISTICAS)
-                    esperado[aid] = "low" if debe_bajar else tramo
+                    # El tramo sembrado es el tramo esperado. Siempre.
+                    esperado[aid] = (tramo, veredicto_de[host])
 
         def _mixto(url):
             for host, fn in guion.items():
@@ -484,15 +521,17 @@ class TestCanarioPaseSobreLaDB(IsolatedTestCase):
                     return fn(url)
             raise AssertionError(f"host inesperado: {url}")
 
+        self.assertEqual(len(sembradas), 54, "el barrido cubre 54 filas")
         res = self._run(_Espia(_mixto))
-        self.assertEqual(res["veredictos"],
-                         {"indis.com": "indiscriminado",
-                          "discri.com": "discrimina",
-                          "indeter.com": "indeterminado"})
+        self.assertEqual(res["veredictos"], veredicto_de)
         for aid in sembradas:
             row = self.db.get_account(aid)
-            with self.subTest(fila=row["display_name"], src=row["source"]):
-                self.assertEqual(row["confidence"], esperado[aid])
+            tramo, veredicto = esperado[aid]
+            with self.subTest(fila=row["display_name"], src=row["source"],
+                              tramo=tramo):
+                self.assertEqual(row["confidence"], tramo,
+                                 "el canario no modifica confidence, nunca")
+                self.assertEqual(row["verifiability"], veredicto)
         # Y ninguna fila cambió de estado: nada se marca `not_mine` solo.
         self.assertEqual({self.db.get_account(a)["status"] for a in sembradas},
                          {"found"})

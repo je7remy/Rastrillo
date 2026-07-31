@@ -8,6 +8,104 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **El canario ya no toca la confianza** (Paso 2C, Entrega 1). Bajar a `low` un
+  sitio `indiscriminado` metía dos conceptos distintos en la misma variable:
+  `low` significa "evidencia débil de que esta cuenta sea tuya",
+  `indiscriminado` significa "la respuesta de este sitio no vale nada, no puedo
+  verificar ni a favor ni en contra". Como `discard-low` marca `not_mine`, la
+  cadena quedaba en **inverificable → low → descartar → "no es mía"**: una
+  afirmación sobre la PROPIEDAD de una cuenta derivada de una señal que no
+  habla de propiedad. En un escaneo real cayeron así Steam y Duolingo, dos
+  sitios donde el dueño sí podía tener cuenta.
+
+  El veredicto vive ahora en su propia columna, **`accounts.verifiability`**
+  (`indiscriminado` | `discrimina` | `indeterminado`; NULL = no evaluado, que
+  no es lo mismo que `indeterminado`), con migración idempotente en
+  `db.init()`. `confidence` vuelve a depender **solo** de `discovery._register`
+  y la corroboración de 2A. El motivo se sigue anotando en
+  `confidence_reasons` como evidencia, pero **no mueve el tramo**.
+  `discard-low` mantiene su criterio (`confidence=='low'`) y por tanto **ya no
+  barre inverificables**. Nueva pestaña "No verificables" en el dashboard para
+  verlos agrupados; deliberadamente **sin acción en lote** asociada.
+
+  Invariante nuevo, con test de barrido sobre 54 filas (fuente × tramo ×
+  veredicto): **el canario no modifica `confidence` en ninguna circunstancia**,
+  ni hacia arriba ni hacia abajo.
+
+- **Canario calibrado contra el catálogo de Sherlock** (Paso 2C, Entrega 2,
+  `rastrillo/catalogo.py`). Dos veredictos falsos, encontrados sondeando los
+  sitios de un escaneo real:
+  - **Steam y HudsonRock** decían que el usuario no existía y no los
+    escuchábamos: `The specified profile could not be found` y `This username
+    is not associated…` no casaban con ninguna frase de la lista, que asumía
+    "not found" contiguo. Los dos daban `indiscriminado` siendo sitios que sí
+    discriminan — HudsonRock, además, es el caso que motivó el módulo entero.
+  - **Duolingo** se sondeaba en la URL equivocada. El `data.json` de Sherlock
+    define `urlProbe` para los sitios que se comprueban contra una API; la
+    `url` visible de Duolingo es una SPA que devuelve el mismo HTML para
+    cualquiera y que Sherlock nunca consulta. Medíamos algo distinto de lo que
+    produjo el hit.
+
+  Ahora el canario lee el catálogo del paquete instalado con
+  `importlib.resources` (sin duplicar la tabla ni añadir dependencias:
+  `sherlock-project` ya era requisito): usa `urlProbe` como plantilla cuando
+  existe y `errorMsg` como marcadores específicos del sitio, además de la lista
+  genérica multi-idioma —que también se amplía con la familia "could not be
+  found" en los 6 idiomas—. El emparejamiento fila ↔ entrada es por forma de la
+  URL, no por nombre ni por host, para desambiguar casos como
+  `Steam Community (User)` vs `(Group)`.
+
+  Lo que **no** se "arregla" a propósito: un sitio que renderiza el perfil en
+  el cliente y no tiene `urlProbe` sigue dando `indiscriminado`, porque es la
+  verdad sobre su respuesta. Sin cobertura: los hits de **Maigret**, que trae
+  su propio catálogo con otro esquema.
+
+- **El canario distingue un bloqueo de un fallo de red** (Paso 2C, Entrega 3).
+  `resolver._http_get` colapsaba 403/429, timeout, DNS y conexión rechazada en
+  un único `None`, así que un sitio que nos rechaza y un sitio caído se veían
+  idénticos y el informe decía "sin respuesta (timeout, 403/429 o red caída)",
+  que vale para todo y no informa de nada — baby.ru devuelve 403 con una página
+  "Security Check". Nuevo `resolver._http_get_detallado` que devuelve
+  `(resultado, motivo)` con `MOTIVO_BLOQUEADO` / `MOTIVO_RED` / `MOTIVO_SSRF`;
+  `_http_get` queda como envoltorio y **su contrato no cambia** (sus tres
+  callers solo distinguen "hubo respuesta" de "no la hubo"). El canario reporta
+  el `indeterminado` diciendo cuál fue, con motivos `canario_bloqueado` /
+  `canario_sin_respuesta`, chip en la UI y causa en el subcomando de debug.
+  Ninguno de los dos se cachea. **No se cambian cabeceras ni se intenta
+  esquivar el bloqueo**: identificarse honestamente y ser rechazado es
+  información válida.
+
+### Fixed
+
+- **Pérdida de datos al migrar una DB legacy con `UNIQUE`** (Paso 2C, Entrega
+  4, `db.py`). El rebuild que quita el `UNIQUE(platform, identifier)` heredado
+  copiaba una lista de columnas escrita a mano que se había quedado atrás
+  respecto al esquema: dejaba fuera `sent_at`, `deletion_eta` y
+  `deletion_started_at`, de modo que migrar borraba **en silencio** la fecha de
+  envío de las solicitudes GDPR y los plazos de eliminación en curso.
+
+  Dos arreglos. El rebuild corre ahora **antes** de los `ALTER TABLE` de
+  `init()` (la tabla recreada nace con el esquema completo), y sobre todo la
+  lista de columnas se calcula **en tiempo de ejecución** como intersección de
+  lo que hay con el esquema actual. Además el esquema de `accounts` pasa a
+  tener una **única** definición (`db._ACCOUNTS_COLUMNS`), de la que salen
+  tanto el `CREATE TABLE` como la tabla temporal del rebuild: la duplicación
+  era la causa raíz y ya no puede volver a divergir. Un test lo vigila
+  comparando los `ADD COLUMN` de `init()` contra la lista.
+
+- **`rastrillo reparar-confianza`** (nuevo subcomando, un solo uso). Restaura
+  el tramo de las filas que el canario del paso 2B bajó a `low`. Hacía falta un
+  paso explícito porque un reescaneo **no** las recupera: `db.upsert_account`
+  hace `return row["id"]` en cuanto la fila existe, así que el `confidence` que
+  recalcula `discovery._register` nunca llega a escribirse. El tramo se
+  reconstruye sin red desde los motivos persistidos (la escala de
+  `_sherlock_confidence` leída al revés). Idempotente, ámbito estrecho (solo
+  filas `low` + `canario_indiscriminado` + fuente heurística), y **sin
+  `--aplicar` solo enseña el plan**; con él hace `snapshot_db()` antes de
+  escribir.
+
 ### Added
 
 - **Canario a nivel de sitio** (Paso 2B, `rastrillo/canario.py`). El paso 2A

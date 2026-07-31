@@ -28,14 +28,16 @@ class TestCLIParser(IsolatedTestCase):
 
     def test_subcomandos_disponibles(self):
         """Los subcomandos registrados. `canario` se sumó en el paso 2B como
-        helper de debug del canario a nivel de sitio."""
+        helper de debug del canario a nivel de sitio; `reparar-confianza` en
+        2C, para deshacer las degradaciones a `low` que hizo aquel canario."""
         p = self.cli.build_parser()
         # `add_subparsers(dest='cmd')` añade un único action al final.
         sub_actions = [a for a in p._actions
                        if a.__class__.__name__ == "_SubParsersAction"]
         self.assertEqual(len(sub_actions), 1)
         choices = set(sub_actions[0].choices.keys())
-        self.assertEqual(choices, {"scan", "list", "report", "run", "canario"})
+        self.assertEqual(choices, {"scan", "list", "report", "run", "canario",
+                                   "reparar-confianza"})
 
     def test_canario_parsea_target_user_y_tokens(self):
         p = self.cli.build_parser()

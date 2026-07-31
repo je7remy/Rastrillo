@@ -1,5 +1,8 @@
 /* eslint-disable */
 const META = window.__RASTRILLO_BOOT__.META;
+/* Verificabilidad: eje SEPARADO de la confianza (Paso 2C, Entrega 1). Dice si
+ * el sitio sirve para comprobar algo, nunca si la cuenta es tuya. */
+const VERIF_META = window.__RASTRILLO_BOOT__.VERIF_META || {};
 const $=id=>document.getElementById(id);
 
 /* ── Estado global de la UI ───────────────────────────────── */
@@ -39,8 +42,10 @@ const REASON_LABEL={
   bump_subdominio:"coincide en subdominio",
   corrob_misma_fila:"2 buscadores",
   corrob_cruzada:"email + username",
-  canario_indiscriminado:"el sitio responde a cualquiera",
+  canario_indiscriminado:"sitio no verificable",
   canario_discrimina:"el sitio verifica usuarios",
+  canario_bloqueado:"el sitio nos bloquea",
+  canario_sin_respuesta:"el sitio no respondió",
   fuente_holehe:"email confirmado",
   fuente_hibp:"brecha de datos",
   hibp_no_sitio:"volcado sin verificar",
@@ -64,6 +69,14 @@ const GROUPS={
  * "exposure" se basa en SOURCE, no en STATUS, así que tiene su propio camino. */
 function isExposure(a){
   return (a.source === "hibp") && (a.status === "found");
+}
+/* Igual que `exposure`: el filtro "unverifiable" es ORTOGONAL al status (mira
+ * `verifiability`, que rellena el canario), así que va por su propio camino y
+ * no entra en GROUPS. Es un filtro para VER agrupados los sitios donde no se
+ * puede comprobar nada — deliberadamente sin ninguna acción en lote asociada:
+ * inverificable no significa "no es mía". */
+function isUnverifiable(a){
+  return a.verifiability === "indiscriminado";
 }
 const SHOW_MSG=new Set(["awaiting_user","manual","failed","skipped","semi_auto",
                         "email_draft","user_done","dry_run","not_mine"]);
@@ -166,6 +179,8 @@ function filterAccounts(acc){
     return acc.filter(a=>a.status==="found" && !a.owned && !isExposure(a));
   if(CURRENT_FILTER==="exposure")
     return acc.filter(isExposure);
+  if(CURRENT_FILTER==="unverifiable")
+    return acc.filter(a=>isUnverifiable(a) && a.status!=="not_mine");
   const set=new Set(GROUPS[CURRENT_FILTER]||[]);
   return acc.filter(a=>set.has(a.status));
 }
@@ -318,6 +333,14 @@ function renderRow(a){
   const conf = a.confidence && !a.owned
     ? `<span class="badge ${CONF_TONE[a.confidence]||""}" title="${escapeAttr(CONF_LABEL[a.confidence]||"")} · source=${escapeAttr(a.source||"")}">${escapeHtml(a.confidence)}</span>`
     : "";
+  // Verificabilidad: badge propio, al lado del de confianza pero SIN mezclarse
+  // con él. Solo pintamos "no verificable": que un sitio sí discrimine es lo
+  // normal y no merece ruido, y "no evaluado" (verifiability nulo) no es un
+  // juicio. El title deja claro que no habla de propiedad.
+  const verifMeta = VERIF_META[a.verifiability];
+  const verif = (a.verifiability==="indiscriminado" && verifMeta && !a.owned)
+    ? `<span class="badge warn" title="${escapeAttr(a.source_site||"Este sitio")} responde igual a usuarios inventados, así que no se puede comprobar nada aquí. No dice que la cuenta no sea tuya.">${escapeHtml(verifMeta[0])}</span>`
+    : "";
   // Tilde verde: la cuenta se confirmó como tuya.
   const ownedMark = a.owned
     ? `<span class="owned-tick" title="Confirmada como tuya">${ic("check")}</span>`
@@ -329,6 +352,7 @@ function renderRow(a){
       <div class="row-meta">${id}${site}${link}${delLink}${sent}${deadlineMeta}</div>
       ${reasonChips(a)}
     </div>
+    ${verif}
     ${conf}
     ${badgeFor(a)}
     <div class="row-actions">${actionsFor(a)}</div>
