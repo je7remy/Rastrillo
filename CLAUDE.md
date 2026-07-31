@@ -41,7 +41,16 @@ principalmente en Arch/Hyprland pero también corre en Windows y Mac.
    sobre la propiedad de una cuenta a partir de una señal que no habla de
    propiedad. `canario._aplicar_a_fila` es el único punto de escritura y no
    toca `confidence` en ninguna rama; lo fija un test de barrido de 54 filas.
-7. **No regeneres `requirements.lock`** salvo que el usuario lo pida
+7. **La memoria de descartes (`discard_memory`) NO se va con
+   `clear_accounts()`.** Es el punto entero del Paso 3: la decisión "esto no es
+   mío" la tomó el usuario y no es un hallazgo del escáner, así que no se borra
+   con los hallazgos. Si se fuera, cada limpieza obligaría a re-triar los
+   mismos falsos positivos (Periscope, HudsonRock). Y **nada escribe ahí por
+   inferencia**: solo los dos endpoints que el usuario pulsa a mano
+   (`/own` con `owned=false` y `discard-low`). Toda decisión guardada tiene que
+   ser deshacible desde la UI ("Era mía"), porque una memoria sin deshacer
+   convierte un error de un clic en permanente.
+8. **No regeneres `requirements.lock`** salvo que el usuario lo pida
    explícitamente en ese mismo mensaje. `pip-compile` re-resuelve TODAS las
    pins contra lo que haya en el índice en ese momento y puede revertir en
    silencio un bump aplicado a mano — ya pasó con `pillow` (12.3.0 → 12.2.0,
@@ -117,6 +126,19 @@ listas.
 `confidence` y `verifiability` son ejes SEPARADOS: ver el invariante 6.
 `snapshot_db()` copia la DB a `~/.rastrillo/backups/` antes de
 `clear_accounts`.
+
+**Memoria de descartes** (Paso 3): tabla `discard_memory`, clave UNIQUE por
+`(source_site, identifier)` normalizado a minúsculas por `_clave_descarte`. El
+PAR y no el sitio suelto: que `mar` no sea mío en un sitio no dice nada sobre
+`je7remy` allí. Guarda solo par + fecha + motivo. Helpers:
+`remember_discard` (upsert idempotente), `forget_discard` (el deshacer),
+`get_discard`, `list_discards`, `count_discards_by_site` y
+`clear_discard_memory`. **`clear_accounts()` no la toca** (invariante 7); hay
+test explícito. Este último helper existe para que un futuro "reset total"
+la incluya sin tener que redescubrir la tabla — hoy no lo llama ningún
+endpoint, porque el Paso 3 tenía prohibido crear acciones destructivas nuevas.
+`discovery._register` la consulta y mete el hallazgo como `not_mine` con el
+motivo `descartado_antes`; `KEEP_PLATFORMS` sigue mandando (invariante 5).
 `profile_url` guarda la URL DEL HIT — la que produjo el descubrimiento y
 sobre la que se calcularon los motivos de confianza. `backfill_profile_url()`
 la rellena SOLO si está vacía (holehe/hibp nunca traen URL). Los CUATRO
@@ -335,6 +357,8 @@ relevantes: `GET /` (HTML), `GET /api/accounts`,
 `POST /api/accounts/{id}/cancel-deletion` (limpia plazo → `manual`),
 `POST /api/accounts/{id}/confirm-account` (promueve HIBP a candidato),
 `POST /api/accounts/process-all-auto`,
+`GET /api/accounts/discard-low/preview` (solo lee: cuántas filas y cuáles
+barrería el descarte masivo; alimenta el conteo exacto del modal),
 `POST /api/accounts/discard-low`,
 `POST /api/accounts/clear`,
 `GET/POST /api/dry-run`,
@@ -507,6 +531,30 @@ Archivos:
   reconstruye; DB nueva intacta; idempotencia sin dejar `accounts__new`; y el
   test que evita la recaída: los `ADD COLUMN` de `init()` tienen que estar
   todos en `_ACCOUNTS_COLUMNS`.
+- `tests/test_memoria_descartes.py` — Paso 3 Entrega 1: la tabla y su migración
+  idempotente (incluida una DB anterior al paso 3), los helpers (clave por par,
+  normalización, upsert que no duplica, par incompleto que no revienta), **que
+  `clear_accounts()` se lleve las cuentas y deje la memoria**, el escaneo
+  posterior (entra `not_mine` con motivo `descartado_antes`; mismo sitio con
+  otro identificador entra normal; KEEP sigue mandando), el ciclo completo
+  descartar → limpiar → reescanear, los dos endpoints que escriben y el
+  deshacer (borra la entrada, devuelve la fila a `found` y el siguiente escaneo
+  la trae de vuelta). Cierra con que un discovery entero no inventa decisiones.
+- `tests/test_senal_sitio.py` — Paso 3 Entrega 2: el umbral (1 identificador no
+  es señal, 2 distintos sí, 2 veces el mismo no), que es por sitio y no se
+  contagia, que deshacer la baja (no se persiste en la fila), y un barrido
+  (3 tramos × 4 niveles de señal) que fija que **la señal no mueve `confidence`
+  ni en la DB ni en la API**. Más: que no exista ningún endpoint que actúe
+  sobre ella.
+- `tests/test_ui_explicita.py` — Paso 3 Entrega 3: barrido del código fuente en
+  busca de motivos registrados (`_motivo("x"` y `{"code": "x"` en
+  `discovery/canario/db`) y comprobación de que **cada uno tiene etiqueta Y
+  tooltip** en `app.js` — añadir un motivo sin su texto rompe aquí, y sobra un
+  texto de un motivo retirado también. Además: `low` dice "evidencia débil de
+  que sea tuya" y no "no es tuya", ningún tooltip lleva HTML, `confirmBodyHtml`
+  escapa ANTES de romper líneas, y el preview del descarte masivo (conteo
+  exacto, no escribe, pide token, y coincide con lo que el POST acaba
+  escribiendo).
 - `tests/test_domain_intel.py` — Domain Intelligence offline: parseo
   WHOIS recursivo y DNS desde fixtures (primitivas de red mockeadas),
   reglas de correlación (MX→Google, NS→Cloudflare, SPF, verificaciones
@@ -514,7 +562,7 @@ Archivos:
   guard anti-SSRF del socket WHOIS, y los endpoints (401 sin token, 400
   dominio inválido, happy-path con persistencia).
 
-Alrededor de 382 tests en poco más de un minuto. Antes de cualquier cambio
+Alrededor de 430 tests en poco más de un minuto. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -567,6 +615,13 @@ Cosas que se podrían apretar más:
   son el mismo y ya significan "no es mía". Haría falta un estado nuevo, con su
   entrada en `db.py`, `server.STATUS_META`, `app.js` (`GROUPS`, `TONE`,
   `SHOW_MSG`) y su filtro.
+- **Promover la señal agregada del sitio** (`server._discard_site_counts`, hoy
+  solo un chip) a algo que mueva la confianza, **si los datos lo justifican**.
+  Está desconectada a propósito: el canario se construyó sobre una hipótesis
+  razonable y sus tres detecciones resultaron ser errores suyos, así que no se
+  conecta una señal sin medir a algo que escribe en la DB. Primero varios
+  escaneos mirándola; el umbral (2 identificadores distintos) vive en
+  `_UMBRAL_SENAL_SITIO` y la muestra es minúscula.
 - **Cobertura del catálogo de Maigret.** `catalogo.py` solo lee el `data.json`
   de sherlock; los hits de maigret sondean la URL visible y se apoyan en la
   lista genérica de marcadores. Maigret trae su propio catálogo con otro

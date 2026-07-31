@@ -507,7 +507,7 @@ Todo bajo `~/.rastrillo/` (`%USERPROFILE%\.rastrillo\` en Windows):
 
 | Ruta | Contenido |
 |---|---|
-| `rastrillo.db` | SQLite con cuentas y eventos |
+| `rastrillo.db` | SQLite: cuentas, eventos, informes de dominio y **memoria de descartes** |
 | `directory.json` | Copia local de JustDeleteMe |
 | `discovered.json` | Caché del resolver por host |
 | `browser-profile/` | Perfil de Chromium con tus sesiones |
@@ -515,6 +515,32 @@ Todo bajo `~/.rastrillo/` (`%USERPROFILE%\.rastrillo\` en Windows):
 | `audit.json` | Log append-only de acciones destructivas |
 | `recipes/` | Tus recetas personales (pisan a las del paquete) |
 | `screenshots/` | Capturas del motor en pasos clave y errores |
+
+### Memoria de descartes
+
+Dentro de `rastrillo.db` vive la tabla **`discard_memory`**: cuando marcas un
+hallazgo como "No es mía", se guarda ahí el par `(sitio, identificador)`, la
+fecha y el motivo. Nada más — es memoria de tus decisiones, no un perfil.
+
+Existe porque hay falsos positivos que ninguna heurística va a resolver:
+Periscope cerró en 2021 y HudsonRock es una consulta de exposición a
+infostealers, no un sitio donde se tengan cuentas. Ambos discriminan
+perfectamente entre usernames, así que el canario no los detecta. Lo que sí
+funciona es que lo digas una vez.
+
+Dos cosas importantes:
+
+- **"Limpiar todas las cuentas" NO borra esta tabla.** Ese es el punto: la
+  decisión la tomaste tú y no es un hallazgo del escáner. Tras limpiar y
+  reescanear, esos hallazgos vuelven a entrar ya descartados, con un chip
+  ("ya la descartaste") que dice por qué. Nada entra descartado en silencio.
+- **Se deshace.** En el filtro "Descartadas", el botón **"Era mía"** borra la
+  entrada y devuelve la cuenta al triage. Sin deshacer, un clic equivocado
+  sería permanente.
+
+Solo se escribe por decisión explícita tuya: el triage individual
+("No es mía") y el botón "Descartar low", que pide confirmación diciendo el
+número exacto de filas. Ninguna inferencia automática escribe aquí.
 
 Lo único que sale del disco: descarga del directorio, GETs a sitios donde
 vas a borrar, Anthropic si IA está activada, HIBP si hay clave. El modelo
@@ -533,8 +559,8 @@ IA recibe estructura de página (árbol de accesibilidad + texto visible),
 .venv/bin/python -m unittest discover -t . -s tests -v
 ```
 
-Suite con `unittest` de stdlib, sin dependencias nuevas. **247 tests**
-(~1 minuto en Windows, ~30 s en Linux). Cada test corre con su propio
+Suite con `unittest` de stdlib, sin dependencias nuevas. **430 tests**
+(~1,5 minutos en Windows, ~40 s en Linux). Cada test corre con su propio
 `RASTRILLO_HOME` en tempdir.
 
 Para validar el motor sin entrar a webs reales, mira

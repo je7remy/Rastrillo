@@ -240,11 +240,44 @@ def _deletion_url(action_meta, profile_url):
     return url
 
 
+# Paso 3, Entrega 2: señal agregada por sitio. Si el usuario descartó el mismo
+# sitio con VARIOS identificadores distintos, eso sugiere que el sitio genera
+# ruido. Mínimo 2: una sola vez no es señal de nada.
+_UMBRAL_SENAL_SITIO = 2
+
+
+def _discard_site_counts() -> dict:
+    """{source_site: nº de identificadores distintos descartados} filtrado al
+    umbral. Por debajo del umbral la clave NO está, y eso es lo que hace que la
+    UI no pinte nada: el umbral vive AQUÍ y en un solo sitio.
+
+    Esta señal es DELIBERADAMENTE informativa y nada más:
+
+      - NO mueve `confidence` en ninguna dirección, ni un tramo.
+      - NO dispara ninguna acción, ni individual ni en lote.
+      - NO se persiste en la fila: se calcula al vuelo desde `discard_memory`,
+        así que deshacer un descarte la baja sola.
+
+    El motivo importa. El canario se construyó sobre una hipótesis razonable y,
+    tras calibrarlo, sus tres detecciones resultaron ser errores suyos. Una
+    inferencia del usuario sobre una muestra minúscula (2 identificadores) no
+    entra a escribir en la DB sin medirla antes durante unos cuantos escaneos.
+    Si resulta útil, se promueve en otro paso.
+    """
+    return {sitio: n for sitio, n in db.count_discards_by_site().items()
+            if n >= _UMBRAL_SENAL_SITIO}
+
+
 @app.get("/api/accounts")
 def api_accounts():
     rows = []
+    por_sitio = _discard_site_counts()
     for r in db.list_accounts():
         d = dict(r)
+        # Señal agregada del sitio (informativa). `None` = sin señal; la UI
+        # solo pinta el chip cuando viene un número.
+        d["site_discards"] = por_sitio.get(
+            (d.get("source_site") or "").strip().lower())
         # Campo computado para la UI (cuenta regresiva). Solo presente si la
         # cuenta tiene un plazo fijado; si no, queda None.
         d["deletion"] = deletion_progress(d.get("deletion_started_at"),
@@ -416,19 +449,45 @@ def api_own(account_id: int, body: OwnBody):
 
     - owned=True  → marca owned=1 (la cuenta sigue en su estado actual).
     - owned=False → status='not_mine'; no se vuelve a proponer.
+
+    Memoria de descartes (Paso 3): las dos ramas escriben en `discard_memory`,
+    y son simétricas a propósito.
+
+    - Descartar ANOTA la decisión, para que sobreviva a `clear_accounts()` y el
+      hallazgo entre ya descartado en el próximo escaneo.
+    - Confirmar "es mía" OLVIDA la decisión. Este es el DESHACER: sin él, un
+      clic equivocado en "No es mía" sería permanente y ni siquiera un
+      reescaneo lo arreglaría (el hallazgo volvería a entrar como `not_mine`).
+      Además devolvemos la fila a `found`, que es donde estaría si nunca se
+      hubiera descartado; en cualquier otro estado no tocamos el status.
+
+    Solo se escribe por decisión EXPLÍCITA del usuario: este endpoint es
+    exactamente el clic de los botones "Es mía" / "No es mía".
     """
     acc = db.get_account(account_id)
     if not acc:
         raise HTTPException(404, "Cuenta no encontrada.")
     if body.owned:
         db.update_account(account_id, owned=1)
-        db.log(account_id, "info", "el usuario confirmó: es mía")
-        audit.record("own", acc, extra={"via": "triage"})
-        return {"ok": True, "owned": True, "status": acc["status"]}
+        olvidada = db.forget_discard(acc["source_site"], acc["identifier"])
+        if acc["status"] == "not_mine":
+            db.set_status(account_id, "found",
+                          "recuperada por el usuario: sí era mía")
+        db.log(account_id, "info", "el usuario confirmó: es mía"
+               + (" (olvido la decisión previa de descarte)" if olvidada else ""))
+        audit.record("own", acc, extra={"via": "triage",
+                                        "discard_memory_forgotten": olvidada})
+        nuevo = "found" if acc["status"] == "not_mine" else acc["status"]
+        return {"ok": True, "owned": True, "status": nuevo,
+                "discard_memory_forgotten": olvidada}
     db.update_account(account_id, owned=0)
     db.set_status(account_id, "not_mine", "descartada por el usuario (triage)")
-    audit.record("discard", acc, extra={"via": "triage"})
-    return {"ok": True, "owned": False, "status": "not_mine"}
+    recordada = db.remember_discard(acc["source_site"], acc["identifier"],
+                                    reason="triage")
+    audit.record("discard", acc, extra={"via": "triage",
+                                        "discard_memory": recordada})
+    return {"ok": True, "owned": False, "status": "not_mine",
+            "discard_memory": recordada}
 
 
 @app.post("/api/accounts/process-all-auto")
@@ -532,6 +591,36 @@ def api_confirm_account(account_id: int):
     return {"ok": True, "source": "hibp_confirmed"}
 
 
+def _filas_low_confidence():
+    """Las filas que barrería "Descartar low". ÚNICO sitio donde vive el
+    criterio: lo comparten el preview (que alimenta el texto de confirmación) y
+    el endpoint que escribe, así que el número que se le enseña al usuario no
+    puede desviarse de lo que va a pasar."""
+    return [r for r in db.list_accounts(status="found")
+            if (r["confidence"] or "") == "low" and not r["owned"]]
+
+
+@app.get("/api/accounts/discard-low/preview")
+def api_discard_low_preview():
+    """Cuántas filas y cuáles barrería "Descartar low". SOLO LEE.
+
+    Existe para que el modal de confirmación pueda decir el número exacto en
+    vez de un "todas las de confianza baja" que no se puede auditar antes de
+    pulsar. Devuelve también la lista corta (sitio + identificador) para que el
+    usuario reconozca lo que va a descartar.
+    """
+    filas = _filas_low_confidence()
+    return {
+        "count": len(filas),
+        "reversible": True,   # se deshace una a una desde "Descartadas"
+        "accounts": [{"id": r["id"],
+                      "display_name": r["display_name"] or r["platform"],
+                      "source_site": r["source_site"],
+                      "identifier": r["identifier"]}
+                     for r in filas],
+    }
+
+
 @app.post("/api/accounts/discard-low")
 def api_discard_low():
     """Bulk: descarta como 'not_mine' todas las cuentas en estado 'found' con
@@ -544,13 +633,21 @@ def api_discard_low():
     encadenar lo uno con lo otro marcaba `not_mine` cuentas que sí eran del
     usuario. Si algún día se quiere una acción en lote sobre inverificables,
     tiene que ser otro endpoint con otro estado: `not_mine` y la pestaña
-    "Descartadas" son el mismo estado y ya significan "no es mía"."""
+    "Descartadas" son el mismo estado y ya significan "no es mía".
+
+    Memoria de descartes (Paso 3): cada fila barrida se anota en
+    `discard_memory`. SÍ cuenta como decisión explícita del usuario —este
+    endpoint es el botón "Descartar low", que se pulsa a mano y con
+    confirmación— aunque el criterio de selección lo ponga la máquina. Deshacer
+    una a una desde "Descartadas" ("Era mía") borra su entrada."""
     n = 0
-    for r in db.list_accounts(status="found"):
-        if (r["confidence"] or "") == "low" and not r["owned"]:
-            db.set_status(r["id"], "not_mine", "descartada en lote (confidence=low)")
-            audit.record("discard", r, extra={"via": "bulk_low"})
-            n += 1
+    for r in _filas_low_confidence():
+        db.set_status(r["id"], "not_mine", "descartada en lote (confidence=low)")
+        recordada = db.remember_discard(r["source_site"], r["identifier"],
+                                        reason="descarte en lote (confianza baja)")
+        audit.record("discard", r, extra={"via": "bulk_low",
+                                          "discard_memory": recordada})
+        n += 1
     return {"ok": True, "discarded": n}
 
 

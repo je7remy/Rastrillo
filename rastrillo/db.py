@@ -133,6 +133,22 @@ CREATE TABLE IF NOT EXISTS domain_reports (
     report TEXT,                -- JSON del analyze()
     created_at REAL
 );
+-- Paso 3: memoria de descartes. Guarda las decisiones de triage del usuario
+-- ("esto no es mío") para que SOBREVIVAN a clear_accounts() y no haya que
+-- volver a triar los mismos falsos positivos en cada escaneo.
+--
+-- La clave es el PAR (source_site, identifier), no el sitio suelto: que `mar`
+-- no sea mío en un sitio no dice nada sobre `je7remy` en ese mismo sitio.
+--
+-- Solo tres datos: el par, cuándo lo decidí y por qué. Nada más. Esta tabla es
+-- memoria de MIS decisiones, no un perfil.
+CREATE TABLE IF NOT EXISTS discard_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_site TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    reason TEXT,                -- motivo textual, si lo hubo
+    created_at REAL
+);
 """
 
 SCHEMA_INDEXES = """
@@ -142,6 +158,10 @@ CREATE INDEX IF NOT EXISTS idx_accounts_platform
     ON accounts(platform, identifier);
 CREATE INDEX IF NOT EXISTS idx_domain_reports_domain
     ON domain_reports(domain);
+-- UNIQUE de verdad aquí (a diferencia de `accounts`): una decisión por par.
+-- Volver a descartar el mismo par refresca la fila, no crea otra.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discard_memory_par
+    ON discard_memory(source_site, identifier);
 """
 
 def _tiene_unique_legacy(con) -> bool:
@@ -487,7 +507,15 @@ def clear_accounts():
     re-escanear desde cero sin acumular hallazgos previos. No toca:
       - el directorio cacheado (~/.rastrillo/directory.json),
       - los hallazgos del resolver (~/.rastrillo/discovered.json),
-      - el perfil persistente de Chromium.
+      - el perfil persistente de Chromium,
+      - **la memoria de descartes** (tabla `discard_memory`).
+
+    Lo último es el punto entero del Paso 3: la decisión "esto no es mío" la
+    tomó el usuario y no es un hallazgo del escáner, así que no se va con los
+    hallazgos. Si se fuera, cada limpieza obligaría a re-triar los mismos
+    falsos positivos (Periscope, HudsonRock…). Para olvidarla hay dos caminos
+    explícitos: deshacer una decisión concreta (`forget_discard`) o vaciar la
+    memoria entera (`clear_discard_memory`).
 
     Antes de tocar nada, hace un snapshot en ~/.rastrillo/backups/.
     """
@@ -504,6 +532,127 @@ def clear_accounts():
         con.execute(
             "DELETE FROM sqlite_sequence WHERE name IN ('accounts','events')"
         )
+
+
+# --- Memoria de descartes (Paso 3) ------------------------------------------
+# El usuario tria un hallazgo como "no es mía" y esa decisión se guarda aquí,
+# fuera de `accounts`, para que sobreviva a `clear_accounts()`. En el siguiente
+# escaneo `discovery._register` la consulta y el hallazgo entra ya descartado,
+# con un motivo que lo dice.
+#
+# Nada escribe aquí por inferencia: solo lo hacen los dos endpoints que el
+# usuario pulsa a mano (triage individual y "Descartar low"). Ver server.py.
+
+def _clave_descarte(source_site, identifier):
+    """Normaliza el par (sitio, identificador) para casar entre escaneos.
+
+    Ambos a minúsculas y sin espacios: el host es case-insensitive por
+    definición y los usernames lo son en la práctica en casi todos los sitios,
+    así que `Mar` y `mar` son la misma decisión. Es una normalización que solo
+    colapsa variantes de la MISMA cadena; no amplía el alcance a otros
+    identificadores. Devuelve None si falta cualquiera de los dos: sin par
+    completo no hay decisión que recordar.
+    """
+    site = (source_site or "").strip().lower()
+    ident = (identifier or "").strip().lower()
+    if not site or not ident:
+        return None
+    return site, ident
+
+
+def remember_discard(source_site, identifier, reason=None) -> bool:
+    """Anota que el usuario descartó este par. Idempotente: repetirlo refresca
+    fecha y motivo en vez de duplicar la fila.
+
+    Devuelve True si se guardó, False si el par estaba incompleto (sin
+    `source_site` o sin `identifier` no hay nada que recordar; pasa con
+    inserts manuales de tests y con filas viejas sin host).
+    """
+    clave = _clave_descarte(source_site, identifier)
+    if clave is None:
+        return False
+    site, ident = clave
+    with connect() as con:
+        con.execute(
+            "INSERT INTO discard_memory (source_site, identifier, reason, created_at) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(source_site, identifier) DO UPDATE SET "
+            "reason=excluded.reason, created_at=excluded.created_at",
+            (site, ident, (reason or None), time.time()),
+        )
+    return True
+
+
+def forget_discard(source_site, identifier) -> bool:
+    """Deshace una decisión: borra la entrada del par. Devuelve True si existía.
+
+    Es la mitad obligatoria de la memoria. Sin deshacer, un clic equivocado en
+    "No es mía" sería permanente y ningún reescaneo lo arreglaría.
+    """
+    clave = _clave_descarte(source_site, identifier)
+    if clave is None:
+        return False
+    with connect() as con:
+        cur = con.execute(
+            "DELETE FROM discard_memory WHERE source_site=? AND identifier=?", clave
+        )
+        return cur.rowcount > 0
+
+
+def get_discard(source_site, identifier):
+    """Fila de la decisión previa para este par, o None si no la hay."""
+    clave = _clave_descarte(source_site, identifier)
+    if clave is None:
+        return None
+    with connect() as con:
+        return con.execute(
+            "SELECT * FROM discard_memory WHERE source_site=? AND identifier=?", clave
+        ).fetchone()
+
+
+def list_discards():
+    """Todas las decisiones recordadas, recientes primero."""
+    with connect() as con:
+        return con.execute(
+            "SELECT * FROM discard_memory ORDER BY created_at DESC"
+        ).fetchall()
+
+
+def count_discards_by_site() -> dict:
+    """{source_site: nº de identificadores DISTINTOS descartados en ese sitio}.
+
+    Base de la señal agregada del Paso 3 / Entrega 2. Cuenta identificadores
+    distintos y no filas porque el UNIQUE ya garantiza una fila por par: dos
+    descartes del mismo identificador siguen siendo UNA decisión sobre UN
+    identificador, y eso no es señal de que el sitio genere ruido.
+
+    Es puramente INFORMATIVA: nadie la usa para mover `confidence` ni para
+    disparar acciones (ver el comentario de `server._discard_site_counts`).
+    """
+    with connect() as con:
+        rows = con.execute(
+            "SELECT source_site, COUNT(DISTINCT identifier) c "
+            "FROM discard_memory GROUP BY source_site"
+        ).fetchall()
+        return {r["source_site"]: r["c"] for r in rows}
+
+
+def clear_discard_memory() -> int:
+    """Vacía la memoria de descartes. Devuelve cuántas decisiones borró.
+
+    No lo llama `clear_accounts` (ver su docstring). Existe para el reset total
+    y para que el usuario pueda empezar de cero su triage a propósito. Snapshot
+    antes de borrar, igual que los otros borrados masivos del repo.
+    """
+    try:
+        snapshot_db()
+    except Exception as e:
+        _log.warning("snapshot DB falló (sigo con clear_discard_memory): %s", e)
+    with connect() as con:
+        n = con.execute("SELECT COUNT(*) c FROM discard_memory").fetchone()["c"]
+        con.execute("DELETE FROM discard_memory")
+        con.execute("DELETE FROM sqlite_sequence WHERE name='discard_memory'")
+        return n
 
 
 # --- Domain Intelligence ----------------------------------------------------

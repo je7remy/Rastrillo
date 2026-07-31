@@ -8,7 +8,67 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- **Memoria de decisiones de triage** (Paso 3, Entrega 1). El canario ataca una
+  clase de falso positivo: sitios que responden igual para cualquiera. Los dos
+  casos confirmados del dueño no son de esa clase — **Periscope** cerró en 2021
+  y **HudsonRock** (`cavalier.hudsonrock.com`) es una consulta de exposición a
+  infostealers, no un sitio donde se tengan cuentas. Ambos discriminan
+  perfectamente entre usernames, así que ninguna heurística automática los va a
+  resolver. Lo que sí lo resuelve es decirlo una vez y que la herramienta lo
+  recuerde, y hasta ahora no lo recordaba: la decisión vivía en la fila de
+  `accounts` y "Limpiar todas las cuentas" se la llevaba por delante.
+
+  Tabla nueva **`discard_memory`** (migración idempotente en `db.init()`) con
+  clave UNIQUE por el **par** `(source_site, identifier)` —que `mar` no sea mío
+  en un sitio no dice nada sobre `je7remy` allí—, más fecha y motivo. Nada más:
+  es memoria de decisiones, no un perfil. **`clear_accounts()` no la toca**
+  (invariante 7, con test explícito). En un escaneo posterior,
+  `discovery._register` la consulta y el hallazgo entra directamente como
+  `not_mine` con el motivo `descartado_antes` — visible como chip, nunca en
+  silencio. `KEEP_PLATFORMS` sigue mandando (invariante 5).
+
+  **Deshacer obligatorio**: "Era mía" en el filtro "Descartadas" borra la
+  entrada y devuelve la fila a `found`. Sin eso, un clic equivocado sería
+  permanente y ni un reescaneo lo arreglaría. Solo escriben en la tabla los dos
+  endpoints que el usuario pulsa a mano (`/own` con `owned=false` y
+  `discard-low`); ninguna inferencia automática lo hace. No se añade ninguna
+  acción destructiva nueva.
+
+- **Señal agregada por sitio, informativa** (Paso 3, Entrega 2). Si el usuario
+  descartó el mismo sitio con **2 o más identificadores distintos**, aparece un
+  chip ("sitio descartado N veces"). **No mueve `confidence` en ninguna
+  dirección y no dispara ninguna acción**, y eso es deliberado: el canario se
+  construyó sobre una hipótesis razonable y, tras calibrarlo, sus tres
+  detecciones resultaron ser errores suyos. No se conecta una señal sin medir a
+  algo que escribe en la DB. Se calcula al vuelo (deshacer un descarte la baja
+  sola), el umbral vive en un solo sitio (`server._UMBRAL_SENAL_SITIO`) y hay
+  un barrido de 3 tramos × 4 niveles que fija que la confianza no se mueve.
+
 ### Changed
+
+- **La UI dice qué va a pasar** (Paso 3, Entrega 3). Los chips explicaban de
+  dónde salía la confianza, pero nada explicaba qué hacía cada botón:
+  - **Tooltip por motivo** (`REASON_TIP`): qué señal lo produjo y qué **no**
+    significa. Un test barre el código fuente en busca de motivos registrados y
+    falla si alguno se queda sin etiqueta o sin frase (y también si sobra el
+    texto de un motivo ya retirado).
+  - **Tooltip por tramo** (`CONF_TIP`). En particular `low` deja claro que es
+    "evidencia DÉBIL de que sea tuya", **no** "no es tuya": la etiqueta roja se
+    leía al revés, y ese malentendido es exactamente el que encadenaba
+    descartes indebidos.
+  - **El descarte masivo dice el número exacto** de filas que va a marcar, una
+    muestra de cuáles y que la acción es reversible. Antes se pulsaba un botón
+    que escribía `not_mine` sin saber sobre cuántas cuentas. El conteo sale del
+    endpoint nuevo `GET /api/accounts/discard-low/preview`, que **solo lee** y
+    comparte el criterio de selección con el POST que escribe, así que el
+    número prometido no puede desviarse de lo que ocurre.
+  - "Limpiar todas las cuentas" también dice cuántas son y qué **no** se lleva
+    por delante (incluida la memoria de descartes).
+  - `showConfirm` ahora respeta los saltos de línea: `confirmBodyHtml` escapa el
+    cuerpo **entero** y solo después convierte `\n` en `<br>`. Ese orden es lo
+    que hace segura la conversión; los cuerpos con `\n\n` salían pegados.
 
 - **El canario ya no toca la confianza** (Paso 2C, Entrega 1). Bajar a `low` un
   sitio `indiscriminado` metía dos conceptos distintos en la misma variable:

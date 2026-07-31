@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -665,7 +666,12 @@ def discover(usernames, emails):
     db.init()
     recipes = load_recipes()
     summary = {
-        "found": 0, "kept": 0, "no_recipe": [], "errors": [],
+        # `remembered_discards`: hallazgos que entraron ya como `not_mine`
+        # porque el usuario los había descartado en un escaneo anterior
+        # (memoria del Paso 3). Se cuentan aparte de `found` para que se vea
+        # cuánto triage se ahorró.
+        "found": 0, "kept": 0, "remembered_discards": 0,
+        "no_recipe": [], "errors": [],
         "raw_counts": {
             "sherlock": 0, "holehe": 0, "hibp": 0, "maigret": 0,
             "sherlock_saved": 0, "holehe_saved": 0, "hibp_saved": 0,
@@ -729,6 +735,21 @@ def discover(usernames, emails):
         is_keep = (platform in config.KEEP_PLATFORMS
                    or host_slug in config.KEEP_PLATFORMS)
 
+        # Memoria de descartes (Paso 3). Si el usuario ya dijo "esto no es mío"
+        # para este PAR exacto (sitio + identificador), el hallazgo entra ya
+        # descartado en vez de volver al triage. Va DESPUÉS de calcular el
+        # tramo y los motivos, y no toca ninguno de los dos: recordar una
+        # decisión de propiedad no es una señal nueva sobre la propiedad, es la
+        # misma decisión de siempre. Solo añade un motivo que lo hace visible —
+        # nada entra descartado en silencio.
+        recordado = db.get_discard(source_site, identifier)
+        if recordado is not None:
+            cuando = time.strftime("%Y-%m-%d", time.localtime(recordado["created_at"] or 0))
+            extra = f" ({recordado['reason']})" if recordado["reason"] else ""
+            motivos.append(_motivo(
+                "descartado_antes",
+                f"ya lo descartaste el {cuando}{extra}"))
+
         fields = dict(
             source=source,
             source_site=source_site,
@@ -744,9 +765,15 @@ def discover(usernames, emails):
             fields["deletion_type"] = "unknown"
 
         if is_keep:
+            # KEEP_PLATFORMS manda (invariante 5): siempre a `skipped`, aunque
+            # hubiera una decisión previa recordada.
             fields["status"] = "skipped"
             fields["last_message"] = "conservada (profesional)"
             summary["kept"] += 1
+        elif recordado is not None:
+            fields["status"] = "not_mine"
+            fields["last_message"] = "descartada antes por ti; la recordé de un escaneo previo"
+            summary["remembered_discards"] += 1
         else:
             fields["status"] = "found"
             if not recipe and platform not in summary["no_recipe"]:

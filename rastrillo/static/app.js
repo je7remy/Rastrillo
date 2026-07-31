@@ -28,6 +28,20 @@ const TONE={
 /* Tono del badge de confianza. */
 const CONF_TONE={ high:"success", medium:"warn", low:"danger" };
 const CONF_LABEL={ high:"Confianza alta", medium:"Confianza media", low:"Confianza baja" };
+/* Qué significa cada tramo y, sobre todo, qué NO significa.
+ *
+ * `low` es el que más falta hacía: la etiqueta roja se lee como "no es tuya" y
+ * no es eso. Confianza baja = evidencia DÉBIL de que sea tuya, que es lo mismo
+ * que decir "no lo sé". Quien decide sigue siendo el usuario. */
+const CONF_TIP={
+  high:"Evidencia fuerte de que la cuenta es tuya (email confirmado, username "
+      +"distintivo o dos fuentes independientes). No es una comprobación: "
+      +"revísala igual antes de borrar.",
+  medium:"Evidencia intermedia. La señal apunta a ti pero no es concluyente.",
+  low:"Evidencia DÉBIL de que sea tuya, normalmente un username corto o común. "
+     +"No significa que no sea tuya: significa que aquí no hay con qué "
+     +"decidirlo. Míralo tú.",
+};
 
 /* Etiqueta corta de cada motivo de confianza (los `code` que persiste
  * discovery en accounts.confidence_reasons). La descripción larga que manda el
@@ -50,7 +64,77 @@ const REASON_LABEL={
   fuente_hibp:"brecha de datos",
   hibp_no_sitio:"volcado sin verificar",
   fuente_manual:"añadida a mano",
+  descartado_antes:"ya la descartaste",
 };
+
+/* Paso 3, Entrega 3: una frase por motivo — qué señal lo produjo y qué NO
+ * significa. Los chips explicaban de dónde salía la confianza, pero no qué
+ * concluir de ellos, y varios se leen más fuerte de lo que son (un chip del
+ * canario habla del SITIO, no de la cuenta).
+ *
+ * Texto plano: va al atributo `title` y el render lo escapa. Nada de HTML.
+ * Hay un test que falla si se registra un motivo nuevo sin su texto aquí. */
+const REASON_TIP={
+  tramo_distintivo:"El username es largo o lleva dígitos y separadores, así que "
+    +"es difícil que otra persona lo comparta. Es una heurística sobre la "
+    +"cadena, no una comprobación de que la cuenta exista o sea tuya.",
+  tramo_corto:"El username es corto y poco distintivo, así que puede haber "
+    +"homónimos. No dice nada en contra de que sea tuya.",
+  tramo_muy_corto:"El username es muy corto y común: casi seguro que hay más "
+    +"gente usándolo. Es la fuente habitual de falsos positivos de Sherlock, "
+    +"pero no descarta que la cuenta sea tuya.",
+  id_vacio:"El hallazgo llegó sin identificador con el que contrastar nada. "
+    +"Es una limitación del dato, no un juicio sobre la cuenta.",
+  bump_path:"El username aparece como segmento completo en la ruta de la URL "
+    +"del hallazgo. Refuerza que la URL va de ese username; no confirma que la "
+    +"persona detrás seas tú.",
+  bump_subdominio:"El username es exactamente el subdominio del sitio "
+    +"(usuario.ejemplo.com). Misma lectura que la ruta: refuerza, no confirma.",
+  corrob_misma_fila:"Dos buscadores de username (Sherlock y Maigret) vieron el "
+    +"mismo sitio. Señal débil: sus catálogos se solapan, así que no son "
+    +"independientes — por eso no sube el tramo de confianza.",
+  corrob_cruzada:"Dos caminos independientes llevan al mismo sitio: tu email "
+    +"por un lado y tu username por otro. Es la corroboración más fuerte que "
+    +"maneja Rastrillo, pero sigue sin ser una comprobación en el sitio.",
+  canario_indiscriminado:"El SITIO responde igual para usuarios inventados, "
+    +"así que su respuesta no sirve para comprobar nada. Habla del sitio, no "
+    +"de tu cuenta: no dice que la cuenta no sea tuya.",
+  canario_discrimina:"El SITIO distingue entre usuarios que existen y que no, "
+    +"así que su respuesta es informativa. Eso valida el sitio como fuente; no "
+    +"confirma que la cuenta sea tuya.",
+  canario_bloqueado:"El sitio nos bloqueó (403/429) al comprobarlo. No sabemos "
+    +"si discrimina. No se cambian cabeceras para esquivarlo, así que se queda "
+    +"sin veredicto.",
+  canario_sin_respuesta:"El sitio no respondió (timeout, DNS o conexión). "
+    +"Distinto de un bloqueo y distinto de no haberlo mirado: se intentó y no "
+    +"se pudo concluir.",
+  fuente_holehe:"Holehe confirmó que ese email está registrado en el sitio. Es "
+    +"la señal más directa que hay, pero confirma el EMAIL, no que la cuenta "
+    +"siga activa.",
+  fuente_hibp:"Tu email apareció en un volcado de datos de este dominio. Eso "
+    +"es EXPOSICIÓN, no una cuenta confirmada: puede ser una cuenta antigua o "
+    +"que la brecha no te afecte. Por eso pide confirmación antes de actuar.",
+  hibp_no_sitio:"La brecha es un volcado agregado, una lista de spam o no está "
+    +"verificada, así que no respalda una cuenta en ningún sitio concreto. "
+    +"Sigue en la lista para que la revises, pero no corrobora nada.",
+  fuente_manual:"La añadiste tú a mano, así que se toma como tuya. Rastrillo "
+    +"no ha comprobado nada por su cuenta.",
+  descartado_antes:"Ya descartaste este par (sitio + identificador) en un "
+    +"escaneo anterior y Rastrillo lo recordó. Es tu decisión de siempre, no "
+    +"una inferencia nueva: si te equivocaste, "
+    +"«Era mía» la borra y vuelve al triage.",
+};
+
+/* Texto del tooltip de un chip: la frase fija del motivo + el detalle concreto
+ * que persistió discovery para ESA fila (p.ej. "username de 7 caracteres").
+ * Si el motivo no tiene frase registrada, cae al detalle, y si tampoco lo hay,
+ * a la etiqueta: mejor poco que un tooltip vacío. */
+function reasonTip(code, desc){
+  const fija = REASON_TIP[code] || "";
+  const detalle = desc ? String(desc) : "";
+  if(fija && detalle) return `${detalle} — ${fija}`;
+  return fija || detalle || (REASON_LABEL[code] || code || "");
+}
 
 /* Agrupación de estados por intención del usuario.
  *   triage = found sin confirmar dueño (de discovery, esperando triage)
@@ -330,8 +414,14 @@ function renderRow(a){
   // Motivos de la confianza: mismo criterio que el badge (solo mientras no
   // esté confirmada como propia, que es cuando sirven para el triage).
   // Texto plano en el title: el render escapa todo, no metemos HTML ahí.
+  // El title lleva la explicación completa del tramo: la etiqueta sola ("low")
+  // se lee como "no es tuya" y no es eso (ver CONF_TIP).
+  const confTip = a.confidence
+    ? `${CONF_LABEL[a.confidence]||""} · fuente: ${a.source||"?"}. `
+      + (CONF_TIP[a.confidence]||"")
+    : "";
   const conf = a.confidence && !a.owned
-    ? `<span class="badge ${CONF_TONE[a.confidence]||""}" title="${escapeAttr(CONF_LABEL[a.confidence]||"")} · source=${escapeAttr(a.source||"")}">${escapeHtml(a.confidence)}</span>`
+    ? `<span class="badge ${CONF_TONE[a.confidence]||""}" title="${escapeAttr(confTip)}">${escapeHtml(a.confidence)}</span>`
     : "";
   // Verificabilidad: badge propio, al lado del de confianza pero SIN mezclarse
   // con él. Solo pintamos "no verificable": que un sitio sí discrimine es lo
@@ -361,25 +451,46 @@ function renderRow(a){
   </div>`;
 }
 
+/* Chip de la señal agregada del sitio (Paso 3, Entrega 2).
+ *
+ * INFORMATIVO Y NADA MÁS: no mueve la confianza ni dispara ninguna acción. El
+ * server ya aplica el umbral (mínimo 2 identificadores distintos) y manda
+ * `site_discards` solo cuando lo supera; aquí no hay lógica de decisión, solo
+ * se pinta lo que llegue. */
+function siteSignalChip(a){
+  const n = a.site_discards;
+  if(!n) return "";
+  const label = `sitio descartado ${n} veces`;
+  const tip = `Ya descartaste ${n} identificadores distintos en `
+            + `${a.source_site||"este sitio"}. Es una observación sobre tus `
+            + `propias decisiones, sobre una muestra pequeña: no cambia la `
+            + `confianza de esta cuenta ni dispara nada.`;
+  return `<span class="chip chip-xs" title="${escapeAttr(tip)}">${escapeHtml(label)}</span>`;
+}
+
 function reasonChips(a){
   if(a.owned) return "";
   const rs = a.confidence_reasons || [];
-  if(!rs.length) return "";
   const chips = rs.map(r=>{
     const code = (r && r.code) ? String(r.code) : "";
     const label = REASON_LABEL[code] || code;
     if(!label) return "";
-    const tip = (r && r.desc) ? String(r.desc) : label;
+    const tip = reasonTip(code, r && r.desc);
     return `<span class="chip chip-xs" title="${escapeAttr(tip)}">${escapeHtml(label)}</span>`;
-  }).join("");
+  }).join("") + siteSignalChip(a);
   return chips ? `<div class="row-reasons">${chips}</div>` : "";
 }
 
 /* ── Triage rápido ─────────────────────────────────── */
+/* "Es mía" y, sobre una fila descartada, "Era mía" (el DESHACER del Paso 3).
+ * El server borra la entrada de la memoria de descartes y devuelve la fila a
+ * `found`; avisamos de lo primero porque es lo que no se ve en la lista. */
 async function markMine(id){
   try{
-    await postJSON(`/api/accounts/${id}/own`,{owned:true});
-    toast("Confirmada como tuya");
+    const r = await postJSON(`/api/accounts/${id}/own`,{owned:true});
+    toast(r && r.discard_memory_forgotten
+      ? "Recuperada — ya no la descartaré en próximos escaneos"
+      : "Confirmada como tuya");
   } catch(e){ toast(e.message, 7000, "err"); }
   load();
 }
@@ -399,18 +510,47 @@ async function markNotMine(id){
   } catch(e){ toast(e.message, 7000, "err"); }
   load();
 }
+/* Descarte en lote. Antes de abrir el modal preguntamos al server EXACTAMENTE
+ * qué filas va a tocar: pulsar un botón que escribe `not_mine` sin saber sobre
+ * cuántas cuentas era el problema. El preview solo lee y comparte el criterio
+ * de selección con el endpoint que escribe, así que el número no puede mentir. */
 async function discardLowConfidence(){
+  let prev;
+  try{
+    prev = await getJSON("/api/accounts/discard-low/preview");
+  } catch(e){ toast(e.message, 7000, "err"); return; }
+
+  /* `getJSON` no lanza en respuestas no-OK: devuelve el cuerpo del error. Sin
+   * este chequeo, un 401 se leería como "0 cuentas" y el usuario creería que
+   * no hay nada que descartar. Mejor decir que no se pudo contar. */
+  if(!prev || typeof prev.count !== "number"){
+    toast((prev && prev.detail) || "No pude consultar qué se descartaría", 7000, "err");
+    return;
+  }
+  const n = prev.count;
+  if(!n){ toast("No hay cuentas de confianza baja pendientes", 3500); return; }
+
+  /* Lista corta para que se reconozca lo que se va a descartar; con muchas,
+   * un resumen en vez de un muro de texto. */
+  const muestra = (prev.accounts||[]).slice(0,8)
+    .map(a=>`· ${a.display_name||a.source_site||"?"} (${a.identifier||"?"})`)
+    .join("\n");
+  const resto = n>8 ? `\n· …y ${n-8} más` : "";
+
   showConfirm({
-    title:"Descartar todo low-confidence",
-    body:"Vas a marcar como 'No es mía' todas las cuentas en estado 'Pendiente' "
-        +"con confianza baja. Útil para limpiar el ruido típico de Sherlock "
-        +"con usernames cortos. Puedes recuperar cada una individualmente desde "
-        +"el filtro 'Descartadas'.",
-    danger:false, confirmLabel:"Descartar low",
+    title:`Descartar ${n} ${n===1?"cuenta":"cuentas"} de confianza baja`,
+    body:`Vas a marcar como "No es mía" ${n===1?"esta cuenta":`estas ${n} cuentas`} `
+        +`en estado "Pendiente":\n\n${muestra}${resto}\n\n`
+        +`Confianza baja significa evidencia DÉBIL de que sean tuyas —no que no `
+        +`lo sean—, así que revisa la lista.\n\n`
+        +`La acción es REVERSIBLE: cada una se recupera desde el filtro `
+        +`"Descartadas" con "Era mía". Rastrillo recordará el descarte entre `
+        +`escaneos, y ese "Era mía" también lo deshace.`,
+    danger:false, confirmLabel:`Descartar ${n}`,
     onYes: async ()=>{
       try{
         const r=await postJSON("/api/accounts/discard-low",{});
-        toast(`${r.discarded} cuenta(s) descartadas`);
+        toast(`${r.discarded} cuenta(s) descartadas · recordadas para próximos escaneos`, 4500);
       } catch(e){ toast(e.message, 7000, "err"); }
       load();
     },
@@ -835,8 +975,16 @@ function copyDraft(){
 function closeModal(){ $("modal").classList.remove("on"); }
 
 /* Confirmación reutilizable: abre el mismo modal con un cuerpo conciso y
- * dos botones (cancelar / acción peligrosa). onYes recibe ninguna arg. */
+ * dos botones (cancelar / acción peligrosa). onYes recibe ninguna arg.
+ *
+ * `body` es TEXTO PLANO. Se escapa entero y solo DESPUÉS se convierten los
+ * saltos de línea en <br>, así que ningún HTML del cuerpo llega vivo al DOM.
+ * Ese orden (escapar → romper líneas) es el que hace segura la conversión; no
+ * lo inviertas. Antes los `\n` se comían y los párrafos salían pegados. */
 let _confirmYes=null;
+function confirmBodyHtml(body){
+  return escapeHtml(String(body==null?"":body)).replace(/\n/g, "<br>");
+}
 function showConfirm({title, body, danger, confirmLabel, onYes}){
   _confirmYes = onYes;
   const m=$("modal");
@@ -847,7 +995,7 @@ function showConfirm({title, body, danger, confirmLabel, onYes}){
               onclick="closeModal()" aria-label="Cerrar">${ic("x")}</button>
     </div>
     <div class="modal-body">
-      <div style="font-size:13px;color:var(--text-2);line-height:1.55">${escapeHtml(body)}</div>
+      <div style="font-size:13px;color:var(--text-2);line-height:1.55">${confirmBodyHtml(body)}</div>
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal()">Cancelar</button>
@@ -863,14 +1011,30 @@ function confirmYes(){
   if(cb) cb();
 }
 
-function askClear(){
+/* "Limpiar todo" es irreversible desde la UI (queda el snapshot en disco), así
+ * que el cuerpo dice el número exacto y qué NO se lleva por delante — en
+ * particular la memoria de descartes, que es justo lo que antes se perdía. */
+async function askClear(){
+  let n = null;
+  try{
+    const d = await getJSON("/api/accounts");
+    // Igual que en el descarte masivo: `getJSON` no lanza en no-OK. Si no
+    // viene la lista, seguimos sin número en vez de decir "0".
+    if(d && Array.isArray(d.accounts)) n = d.accounts.length;
+  } catch(e){ /* si no se puede contar, seguimos sin número */ }
+  if(n === 0){ toast("No hay cuentas que limpiar", 3000); return; }
+  const cuantas = n===null ? "TODAS las cuentas detectadas"
+                           : `las ${n} cuentas detectadas`;
   showConfirm({
     title:"Limpiar todas las cuentas",
-    body:"Vas a borrar TODAS las cuentas detectadas de esta sesión, junto con su "
-        +"historial. El directorio cacheado, los hallazgos del resolver y tu "
-        +"perfil de Chromium no se tocan.\n\nDespués podrás escanear de nuevo "
-        +"sin acumulado previo.",
-    danger:true, confirmLabel:"Borrar todo",
+    body:`Vas a borrar ${cuantas} de esta sesión, junto con su historial.\n\n`
+        +"NO se tocan: el directorio cacheado, los hallazgos del resolver, tu "
+        +"perfil de Chromium ni las decisiones de triage que ya tomaste — los "
+        +"hallazgos que descartaste seguirán descartados en el próximo escaneo "
+        +"y no tendrás que volver a triarlos.\n\n"
+        +"Esto NO se deshace desde la interfaz, pero antes de borrar se guarda "
+        +"una copia de la base de datos en ~/.rastrillo/backups/.",
+    danger:true, confirmLabel: n===null ? "Borrar todo" : `Borrar ${n}`,
     onYes: async ()=>{
       try{
         await postJSON("/api/accounts/clear",{});
