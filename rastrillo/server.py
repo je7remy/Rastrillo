@@ -37,7 +37,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audit, config, db, jobs, directory, ai_assist, resolver, domain_intel
+from . import (audit, config, db, jobs, directory, ai_assist, resolver,
+               domain_intel, glosario, reports)
 from .recipes import get_recipe
 
 # Tarea 10: el frontend vive en rastrillo/static/ (HTML + CSS + JS).
@@ -49,33 +50,12 @@ log = logging.getLogger("rastrillo.server")
 
 app = FastAPI(title="Rastrillo")
 
-STATUS_META = {
-    "found":         ("Pendiente",        "#888780"),
-    "queued":        ("En cola",          "#185FA5"),
-    "in_progress":   ("En proceso",       "#BA7517"),
-    "awaiting_user": ("Esperándote",      "#D85A30"),
-    "deleted":       ("Eliminada",        "#0F6E56"),
-    "anonymized":    ("Anonimizada",      "#534AB7"),
-    "user_done":     ("Tramitada",        "#0F6E56"),
-    "semi_auto":     ("Acción: 1 clic",   "#0F6E56"),
-    "email_draft":   ("Solicitud correo", "#534AB7"),
-    "pending_deletion": ("Plazo de eliminación", "#BA7517"),
-    "manual":        ("Revisar",          "#854F0B"),
-    "skipped":       ("Conservada",       "#5F5E5A"),
-    "failed":        ("Error",            "#A32D2D"),
-    "not_mine":      ("Descartada",       "#5F5E5A"),
-    "dry_run":       ("Simulada",         "#534AB7"),
-}
-
-# Verificabilidad (Paso 2C, Entrega 1): eje SEPARADO de la confianza. Dice si
-# la respuesta del sitio sirve para comprobar algo, nunca si la cuenta es del
-# usuario. La ausencia de entrada (verifiability NULL) significa "no evaluado"
-# y la UI no pinta nada: no es un juicio, es que el canario no ha mirado.
-VERIFIABILITY_META = {
-    "indiscriminado": ("No verificable",  "#854F0B"),
-    "discrimina":     ("Verificable",     "#0F6E56"),
-    "indeterminado":  ("Sin veredicto",   "#5F5E5A"),
-}
+# Etiquetas de estado y de verificabilidad. La definición canónica se movió a
+# `glosario.py` en el Paso 4 para que el informe PDF pueda usarla sin importar
+# este módulo (FastAPI + Playwright para generar un fichero, no). Aquí se
+# reexportan con su nombre de siempre: `_boot_script` y los tests no cambian.
+STATUS_META = glosario.STATUS_META
+VERIFIABILITY_META = glosario.VERIFIABILITY_META
 
 # Acciones que SÍ son irreversibles. Para ellas:
 #   - se exige owned=1 en la cuenta (o confirm_owned=true en el body),
@@ -219,25 +199,10 @@ def deletion_progress(started_at, eta, now=None) -> Optional[dict]:
     return {"days_left": days_left, "overdue": bool(overdue), "pct": round(pct, 1)}
 
 
-def _deletion_url(action_meta, profile_url):
-    """URL de borrado que guardó el resolver en `action_meta`, o None.
-
-    Devuelve None si no hay Resolution, si su JSON está corrupto (misma
-    tolerancia que `db.parse_reasons`: mejor sin enlace que una vista rota) o
-    si coincide con la del hit, para no pintar el mismo enlace dos veces.
-    """
-    if not action_meta:
-        return None
-    try:
-        meta = json.loads(action_meta)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(meta, dict):
-        return None
-    url = (meta.get("url") or "").strip() or None
-    if url and url == (profile_url or "").strip():
-        return None
-    return url
+# La lógica vive en `reports.py` desde el Paso 4: la comparte con el informe
+# PDF, que no puede importar `server` (arrastraría FastAPI y Playwright para
+# generar un fichero). El nombre privado se mantiene por compatibilidad.
+_deletion_url = reports.deletion_url
 
 
 # Paso 3, Entrega 2: señal agregada por sitio. Si el usuario descartó el mismo

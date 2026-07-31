@@ -23,6 +23,33 @@ from typing import Any, Dict, List, Tuple, Union
 from . import audit, db
 
 
+def deletion_url(action_meta, profile_url) -> Any:
+    """URL de BAJA que guardó el resolver en `action_meta`, o None.
+
+    Vive aquí (y no en `server.py`, de donde se movió en el Paso 4) porque la
+    necesitan dos consumidores: el endpoint `/api/accounts` y el informe PDF.
+    `report_pdf` no puede importar `server` —arrastraría FastAPI y, vía
+    `jobs`, la cadena de Playwright— así que la lógica baja a un módulo que
+    ambos pueden importar. `server._deletion_url` sigue existiendo como alias.
+
+    Devuelve None si no hay Resolution, si su JSON está corrupto (misma
+    tolerancia que `db.parse_reasons`: mejor sin enlace que una vista rota) o
+    si coincide con la del hit, para no pintar el mismo enlace dos veces.
+    """
+    if not action_meta:
+        return None
+    try:
+        meta = json.loads(action_meta)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    url = (meta.get("url") or "").strip() or None
+    if url and url == (profile_url or "").strip():
+        return None
+    return url
+
+
 def _enrich_rows() -> Tuple[List[Dict[str, Any]], float]:
     """Carga todas las cuentas y las anota con días desde el envío de la
     solicitud GDPR (si hay), la capa del resolver y el destinatario/asunto

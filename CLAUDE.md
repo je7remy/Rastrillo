@@ -344,8 +344,15 @@ el header `Host` contra `config.ALLOWED_HOSTS` en TODAS las peticiones
 `StaticFiles` bajo `/static/`; la **única** pieza dinámica del HTML es
 `window.__RASTRILLO_BOOT__`, inyectada por `_boot_script()` (hoy: solo
 `STATUS_META`). Si añades algo nuevo que el JS necesite al arrancar,
-ponlo ahí — no reintroduzcas placeholders en `index.html`. Endpoints
-relevantes: `GET /` (HTML), `GET /api/accounts`,
+ponlo ahí — no reintroduzcas placeholders en `index.html`.
+
+Dos nombres del módulo son hoy REEXPORTS y no definiciones (Paso 4, para que
+`report_pdf` no tenga que importar este módulo): `STATUS_META` y
+`VERIFIABILITY_META` vienen de `glosario.py`, y `_deletion_url` es
+`reports.deletion_url`. Si añades un estado, la etiqueta va en `glosario.py`;
+hay un test que exige que todo estado documentado en `db.py` tenga la suya.
+
+Endpoints relevantes: `GET /` (HTML), `GET /api/accounts`,
 `GET/POST /api/scan/*`, `GET /api/directory`,
 `POST /api/directory/refresh`,
 `POST /api/accounts/{id}/action` (delete/anonymize/keep/retry/continue),
@@ -385,8 +392,97 @@ snapshot reducido de cada acción destructiva (delete, anonymize,
 mark-sent, own, discard, confirm-account). Rota a `audit_<ts>.json`
 cuando supera `RASTRILLO_AUDIT_MAX_BYTES` (default 5 MB).
 
-`rastrillo/report_pdf.py` — generación del informe PDF (reportlab). Lo
-usa el endpoint `GET /api/report?format=pdf`.
+`rastrillo/reports.py` — construcción de informes en JSON / CSV / PDF.
+`build_report(fmt)` devuelve `(contenido, media_type, nombre_sugerido)` y lo
+comparten el endpoint `GET /api/report` y el subcomando `report`, para que
+produzcan lo mismo. Los formatos `json` y `csv` (`_CSV_COLS`) son contrato:
+no se tocan.
+
+Aquí vive también `deletion_url(action_meta, profile_url)`, que bajó de
+`server.py` en el Paso 4 porque la necesitan DOS consumidores —el endpoint
+`/api/accounts` y el informe PDF— y `report_pdf` no puede importar `server`.
+`server._deletion_url` es un alias suyo. Devuelve `None` si el JSON está
+corrupto o si la URL coincide con la del hit, para no pintar dos veces el
+mismo enlace.
+
+`rastrillo/report_pdf.py` — el informe PDF (reportlab). Lo usa el endpoint
+`GET /api/report?format=pdf` y el subcomando `report --format pdf`; la firma
+`render_pdf(accounts, summary, audit_summary, generated_at)` no ha cambiado.
+
+Desde el Paso 4 es un DOCUMENTO, no un volcado de la tabla. Cuatro partes:
+**portada** (alcance, totales grandes, aviso de datos personales), **resumen**
+(distribución por estado / confianza / verificabilidad con barras dibujadas a
+mano —rectángulos del canvas, cero librerías de gráficos— y el recuento del
+audit log), **detalle por cuenta** agrupado por estado, y **anexo** con el
+glosario. Los criterios de diseño están escritos en la cabecera del módulo para
+que sean auditables; los que no se pueden romper sin romper el documento:
+
+- **Ningún dato depende del color.** Estado, confianza y verificabilidad se
+  imprimen SIEMPRE como palabras y cada barra lleva su número al lado. En
+  blanco y negro el informe se lee igual. El acento (`ACENTO`) es decoración.
+  Las barras van todas del mismo tono a propósito: teñir la más alta hacía que
+  una diferencia de 1 sobre 75 pareciera una distinción de categoría.
+- **La URL del PERFIL y la de BAJA son campos separados y etiquetados**
+  («Perfil detectado» / «Cómo darse de baja»). Es el mismo bug que se arregló
+  en la UI y no se reintroduce en papel. La de baja sale de
+  `reports.deletion_url`.
+- **Una entrada no se parte**: cada una va en un `KeepTogether`. Los títulos
+  llevan `keepWithNext` para no quedarse solos al pie. `KeepTogether` solo
+  puede mantener unido lo que quepa en una página, así que los topes
+  (`MAX_URL`, `MAX_NOTA`, `MAX_SITIO`, `MAX_IDENT`) son parte del mecanismo;
+  hay un test que mide el caso peor contra la altura del frame.
+- **`MAX_ALCANCE` no es cosmético.** La portada enumeraba TODOS los
+  identificadores y con 300 cuentas de nombres largos el párrafo superaba la
+  altura de la página: `LayoutError` y el informe entero perdido. Con nombres
+  cortos el caso quedaba a un 5% del límite, así que no se veía venir.
+- Nada de `None` impreso: los campos vacíos dicen «no disponible», «sin señales
+  registradas» o «no evaluada» (que NO es lo mismo que «sin veredicto»: ver
+  `glosario.etiqueta_verificabilidad`).
+
+El CUERPO de los correos GDPR sigue sin imprimirse (puede llevar PII);
+destinatario y asunto sí, que es lo que ya guardaba `last_message`.
+
+`rastrillo/pdf_fuentes.py` — **qué fuente usa el PDF y qué hace con lo que no
+cubre**. El problema medido en el Paso 4: las base-14 de PostScript van con
+WinAnsiEncoding (Latin-1 y poco más) y la familia Bitstream Vera que empaqueta
+reportlab 4.5.1 tiene 283 codepoints y **0/96 de cirílico**. Y reportlab **no
+lanza** ante un glifo ausente: no dibuja nada. Un nombre en ruso desaparecería
+en silencio, y la DB real tiene cirílico (borrador GDPR de `baby.ru`).
+
+Tres escalones: (1) fuente del sistema con cobertura cirílica —DejaVu,
+Liberation, Noto, FreeSans, Arial, Segoe UI…— buscada en las rutas habituales
+de Linux/macOS/Windows; (2) **Vera**, la de dentro de reportlab, que no añade
+binario ni licencia al repo; (3) Helvetica base-14. En los escalones 2 y 3 el
+cirílico no se puede representar y entonces `sanear()` lo sustituye por
+`[U+0412]` **visible**, lo cuenta, y el colofón del informe dice con qué fuente
+se compuso y cuántos caracteres no pudo representar. Es feo a propósito: un
+código se ve e se investiga, un hueco en blanco no.
+
+**No se embebe ninguna fuente en el repo** (decisión del usuario, Paso 4). La
+contrapartida asumida es que el PDF no es byte-idéntico entre máquinas. Las
+equivalencias tipográficas seguras (`→` → `->`) evitan gastar un escape donde
+basta ASCII; NO hay transliteración (`ř` no se convierte en `r`: eso sería
+alterar el dato en silencio).
+
+`rastrillo/glosario.py` — textos compartidos. Aloja `STATUS_META` y
+`VERIFIABILITY_META`, que **antes vivían en `server.py`**: se movieron porque
+el PDF los necesita y no puede importar `server` (arrastraría FastAPI y, vía
+`jobs`, la cadena de Playwright, para generar un fichero). `server` los
+reexporta con su nombre de siempre, así que `_boot_script` y los tests no
+cambian.
+
+Y sobre todo: **el anexo del PDF lee las explicaciones de `static/app.js`**, en
+tiempo de render. No es una copia sincronizada por un test, es literalmente la
+misma cadena que el tooltip del dashboard. Se hizo así porque esas frases se
+escribieron con cuidado en el Paso 3 para decir qué NO significa cada señal
+(`low` es «evidencia débil de que sea tuya», no «no es tuya») y dos redacciones
+se desvían con el primer retoque — de las dos, la del papel es la que el
+usuario archiva. Si tocas un tooltip, el PDF siguiente lo dice igual solo.
+
+El parseo es deliberadamente tonto (contar llaves, juntar literales separados
+por `+`), como el de `tests/test_ui_explicita.py`. Si `app.js` deja de ser
+literales planos, `cargar_textos()` devuelve `{}` y el anexo **imprime que no
+pudo leerlo** en vez de inventarse las frases o reventar a mitad del informe.
 
 `rastrillo/domain_intel.py` — **Domain Intelligence** (recon OSINT
 defensivo sobre UN dominio; AMPLÍA el alcance de "solo tus cuentas" — es
@@ -561,8 +657,30 @@ Archivos:
   TXT), degradación visible (timeout WHOIS, NXDOMAIN, timeout por tipo),
   guard anti-SSRF del socket WHOIS, y los endpoints (401 sin token, 400
   dominio inválido, happy-path con persistencia).
+- `tests/test_informe_pdf.py` — Paso 4, el informe PDF. Sin dependencias nuevas
+  no se puede parsear un PDF, así que se comprueba lo que sí se puede: que la
+  salida empiece por `%PDF` y acabe en `%%EOF` con `startxref` y `/Type
+  /Catalog`; el número de páginas contando objetos de página en los bytes (las
+  cuatro partes son un suelo estructural, y más cuentas = más páginas); DB
+  vacía → PDF válido; cadenas patológicas (URL de 500+, cirílico, CJK, emoji,
+  campos `None`) que no lanzan y **no imprimen "None"** —se inspeccionan los
+  `Paragraph` de la entrada, que es donde estaría—; 300 filas con tope de
+  tiempo; la fuente elegida y `sanear()` en sus tres escalones; que perfil y
+  baja salgan como enlaces distintos; y los saltos (la entrada es un
+  `KeepTogether`, el caso peor cabe en una página, los títulos llevan
+  `keepWithNext`).
 
-Alrededor de 430 tests en poco más de un minuto. Antes de cualquier cambio
+  **EL test del enunciado**: que los textos del anexo salgan de la MISMA fuente
+  que los tooltips. Lo comprueba un parser de `app.js` **independiente** del de
+  `glosario.py` —por líneas, no contando llaves— para que una divergencia se
+  note; luego exige que cada frase aparezca de verdad en los flowables del
+  anexo, y que sin `app.js` el anexo lo diga en vez de inventar o reventar.
+
+  Y la regresión del «Alcance»: 300 identificadores largos de los dos tipos.
+  Se verificó que sin el tope revienta con `LayoutError`; con nombres cortos
+  el caso quedaba a un 5% del límite y pasaba desapercibido.
+
+Alrededor de 468 tests en poco más de un minuto. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -629,6 +747,21 @@ Cosas que se podrían apretar más:
 - **El canario da `discrimina` ante un 5xx.** `status >= 400` no distingue "el
   usuario no existe" de "el sitio se rompió". Es la semántica previa a 2C y se
   dejó intacta a propósito; merece revisión con evidencia.
+
+- **El PDF no es byte-idéntico entre máquinas.** Depende de qué fuente haya
+  instalada (ver `pdf_fuentes.py`). Es la contrapartida asumida al descartar
+  embeber un binario en el repo. Si algún día se quiere salida reproducible,
+  la vía es embeber DejaVu Sans —licencia permisiva, cobertura cirílica y
+  griega— y eso es una decisión del mantenedor, no una tarea que se pueda
+  tomar por cuenta propia.
+- **CJK y emoji no se representan nunca.** Ninguna fuente latina los cubre, así
+  que salen como `[U+30C6]`. Es honesto pero feo. Solo se arregla embebiendo
+  una fuente CJK, que es mucho binario para un caso marginal en una
+  herramienta cuyo alcance son 6 idiomas latinos + ruso.
+- **El resumen del PDF deja media página en blanco con pocas cuentas**, porque
+  cada sección arranca en página nueva. Es convención de documento, no un
+  fallo; si molesta, la alternativa es dejar que el detalle siga en la misma
+  página y perder el arranque limpio de sección.
 
 - Endurecer el bucle de IA: presupuesto explícito de tokens, screenshot
   por turno opcional.

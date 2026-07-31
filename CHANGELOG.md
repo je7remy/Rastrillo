@@ -10,6 +10,95 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- **El informe PDF pasa a ser un documento** (Paso 4). Hasta ahora
+  `report --format pdf` era un volcado de `accounts`: una cabecera, un par de
+  tablas de recuentos y una tabla larga de siete columnas con el estado teñido
+  de un pastel. Servía para mirar datos por encima, no para archivar ni para
+  imprimir. Ahora tiene estructura:
+
+  **Portada** con el alcance (qué identificadores contiene el informe,
+  derivados de las propias cuentas: no existe un registro de "qué se escaneó",
+  así que el documento declara su contenido y no una intención pasada), los
+  cinco totales en grande, y el aviso de que lleva datos personales y se generó
+  en local. **Resumen** con la distribución por estado, por confianza y por
+  verificabilidad —barras dibujadas con rectángulos del canvas, sin añadir
+  ninguna librería de gráficos— más el recuento del audit log. **Detalle por
+  cuenta** agrupado por estado, una entrada por cuenta. Y un **anexo** que
+  explica los tramos de confianza y los veredictos del canario.
+
+  Los criterios de diseño están escritos en la cabecera del módulo para que se
+  puedan auditar, pero dos son de fondo y no de gusto. El primero: **ningún
+  dato depende del color**. El estado, la confianza y la verificabilidad se
+  imprimen siempre como palabras y cada barra lleva su número al lado, así que
+  el informe se lee igual en blanco y negro o con daltonismo; el acento es
+  decoración y nada más. El segundo: **la URL del perfil y la de baja son dos
+  campos distintos y etiquetados** («Perfil detectado» / «Cómo darse de baja»).
+  Ese error ya se arregló en la UI y no tenía ningún sentido reintroducirlo en
+  papel, donde además nadie puede pasar el ratón por encima para desambiguar.
+
+- **Unicode que no desaparece en silencio** (Paso 4). Al medir qué fuentes
+  había disponibles apareció el problema de verdad, y no era estético:
+
+  | Fuente | Codepoints | Cirílico (U+0400–U+045F) |
+  |---|---|---|
+  | Helvetica base-14 (WinAnsiEncoding) | ~cp1252 | **0/96** |
+  | `Vera.ttf`, empaquetada en reportlab 4.5.1 | 283 | **0/96** |
+
+  Es decir: **ninguna** de las fuentes disponibles sin añadir nada al repo
+  cubre cirílico. Y reportlab **no lanza** ante un glifo que no existe —
+  simplemente no dibuja nada. Rastrillo soporta 6 idiomas incluido el ruso y la
+  DB real tiene cirílico (el borrador GDPR de `baby.ru`), así que el informe
+  habría perdido texto sin decirlo, que es el peor fallo posible en un
+  documento que se archiva como prueba de lo que se hizo.
+
+  `pdf_fuentes.py` resuelve en tres escalones: primero una fuente del sistema
+  con cobertura cirílica (DejaVu, Liberation, Noto, FreeSans, Arial, Segoe UI…,
+  buscada en las rutas habituales de Linux, macOS y Windows), después **Vera**,
+  que ya viene dentro de reportlab y no añade binario ni licencia al repo, y en
+  último caso Helvetica. Cuando el escalón que toca no cubre un carácter, NO se
+  calla: sale como `[U+0412]`, se cuenta, y el colofón dice con qué fuente se
+  compuso el informe y cuántos caracteres no pudo representar. Es feo a
+  propósito — un código se ve y se puede investigar; un hueco en blanco, no.
+
+  **No se ha embebido ninguna fuente en el repo.** La contrapartida asumida es
+  que el PDF no es byte-idéntico entre máquinas. Las equivalencias tipográficas
+  seguras (`→` → `->`) evitan gastar un escape donde basta ASCII, pero no hay
+  transliteración: `ř` no se convierte en `r`, porque eso sería alterar el dato
+  en silencio, que es justo lo que se estaba arreglando.
+
+- **El anexo lee los textos de los tooltips, no una copia de ellos** (Paso 4).
+  Las explicaciones de qué significa cada señal ya existían: se escribieron con
+  cuidado en el Paso 3 para decir sobre todo qué NO significan (`low` es
+  «evidencia débil de que sea tuya», no «no es tuya»). Reescribirlas para el
+  papel habría creado dos redacciones que se desvían con el primer retoque, y
+  de las dos la del papel es la que el usuario archiva.
+
+  `glosario.py` las lee de `static/app.js` en tiempo de render. No es una copia
+  sincronizada por un test: es literalmente la misma cadena. Si alguien retoca
+  un tooltip, el PDF siguiente lo dice igual sin que nadie tenga que acordarse.
+  Si `app.js` deja de ser parseable, el anexo **imprime que no pudo leer las
+  definiciones** en vez de inventárselas o reventar a mitad del informe.
+
+  De paso, `STATUS_META` y `VERIFIABILITY_META` bajan de `server.py` a
+  `glosario.py`, y `deletion_url()` de `server.py` a `reports.py`: el informe
+  las necesita y no puede importar `server` sin arrastrar FastAPI y, por
+  `jobs`, la cadena de Playwright, para generar un fichero. Ambos nombres se
+  reexportan, así que nada externo cambia.
+
+- **El «Alcance» se resume en vez de enumerarlo todo** (Paso 4). Se anota
+  aparte porque fue un fallo de verdad, encontrado y corregido dentro de este
+  mismo trabajo. La portada enumeraba TODOS los identificadores del informe.
+  Con 300 cuentas de nombres largos el párrafo superaba la altura de la caja de
+  texto y reportlab abortaba con `LayoutError`: no es que la portada saliera
+  fea, es que **no había informe**.
+
+  Salió generando la muestra de estrés, no en la suite, y por poco: con
+  nombres cortos el caso medía 674 pt contra un frame de 723, a un 5% del
+  límite. Ahora se listan los primeros y se dice cuántos quedan («… y 288
+  más»), que además informa más que una lista de 300. La regresión que lo
+  cubre usa identificadores largos y de los dos tipos, y se comprobó que falla
+  sin el arreglo.
+
 - **Memoria de decisiones de triage** (Paso 3, Entrega 1). El canario ataca una
   clase de falso positivo: sitios que responden igual para cualquiera. Los dos
   casos confirmados del dueño no son de esa clase — **Periscope** cerró en 2021

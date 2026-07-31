@@ -62,7 +62,7 @@
 - ⏳ **Eliminación programada** — registra el plazo que da la plataforma ("en 30 días"), con cuenta regresiva, fecha final y barra de progreso. Al vencer no marca nada solo: ofrece **Verificar**.
 - 💾 **Resumible** — `current_step` y hash de receta persistidos, audit log append-only, backup de DB antes de borrados masivos.
 - 🧪 **Modo simulación** — flujo completo sin disparar la acción destructiva final.
-- 📤 **Informe exportable** — JSON, CSV o PDF.
+- 📤 **Informe exportable** — JSON y CSV para procesar, y un **PDF pensado para archivar o imprimir**: portada con el alcance y los totales, resumen por estado y confianza, detalle por cuenta y un anexo que explica qué significa cada señal. Ningún dato depende del color, así que se lee igual en blanco y negro.
 - 🌐 **Inteligencia de dominio** — WHOIS + DNS (A/MX/NS/TXT) + correlación heurística de proveedores, para tu propia infraestructura o la que tienes permiso de auditar.
 
 ---
@@ -304,6 +304,17 @@ Tareas sin abrir UI (debug, scripts, automatización):
 ./rastrillo.sh reparar-confianza [--aplicar]               # mantenimiento de un solo uso
 ```
 
+Sobre el PDF y las tildes: **Rastrillo no empaqueta ninguna fuente.** Al generar
+el informe busca una del sistema con cobertura amplia (DejaVu, Liberation, Noto,
+FreeSans, Arial, Segoe UI…) y, si no encuentra ninguna, cae a la Bitstream Vera
+que ya viene dentro de reportlab. Vera cubre Latin-1 completo pero **no cubre
+cirílico**, así que en un sistema pelado un nombre en ruso saldría como
+`[U+0412]`. No es un fallo silencioso: el colofón de la última página dice con
+qué fuente se compuso el informe y cuántos caracteres no se pudieron
+representar. Si te pasa, instala DejaVu Sans (o Noto, o Liberation) y vuelve a
+generarlo. El CJK y los emoji no los cubre ninguna fuente latina y salen siempre
+como su código.
+
 `canario` es el helper de debug del canario a nivel de sitio: pregunta al sitio
 por dos usernames inventados y te enseña la evidencia cruda (qué URL sondeó y
 por qué, status de cada uno, marcadores de "no existe", similitud entre los
@@ -429,12 +440,15 @@ rastrillo/
 │   ├── jobs.py             # Coordinación server↔engine
 │   ├── server.py           # API FastAPI
 │   ├── audit.py            # Log append-only
-│   ├── report_pdf.py       # Generación del informe PDF
+│   ├── report_pdf.py       # El informe PDF (portada/resumen/detalle/anexo)
+│   ├── pdf_fuentes.py      # Fuente del PDF + degradación visible de Unicode
+│   ├── glosario.py         # Etiquetas y textos compartidos con el dashboard
 │   ├── reports.py          # Construcción de informes (json/csv/pdf)
 │   ├── recipes/            # Recetas de ejemplo
 │   └── static/             # Frontend (index.html + css + js)
 │
-├── tests/                  # 292 tests con unittest stdlib
+├── tests/                  # 468 tests con unittest stdlib
+│   ├── test_informe_pdf.py     # El informe PDF (estructura, Unicode, volumen)
 │   ├── test_confidence_signals.py  # Confianza y falsos positivos (offline)
 │   ├── test_canario.py         # Canario a nivel de sitio (offline, red mockeada)
 │   ├── test_url_del_hit.py     # Frontera `@ ~ #` + la URL del hit en el triage
