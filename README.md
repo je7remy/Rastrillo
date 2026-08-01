@@ -476,7 +476,7 @@ rastrillo/
 │   ├── recipes/            # Recetas de ejemplo
 │   └── static/             # Frontend (index.html + css + js)
 │
-├── tests/                  # 540 tests con unittest stdlib
+├── tests/                  # 589 tests con unittest stdlib
 │   ├── test_informe_pdf.py     # El informe PDF (estructura, Unicode, volumen)
 │   ├── test_informe_http.py    # La DESCARGA del informe (transporte, no generador)
 │   ├── test_confidence_signals.py  # Confianza y falsos positivos (offline)
@@ -610,7 +610,7 @@ IA recibe estructura de página (árbol de accesibilidad + texto visible),
 .venv/bin/python -m unittest discover -t . -s tests -v
 ```
 
-Suite con `unittest` de stdlib, sin dependencias nuevas. **540 tests**
+Suite con `unittest` de stdlib, sin dependencias nuevas. **589 tests**
 (~2,5 minutos en Windows, ~1 minuto en Linux). Cada test corre con su propio
 `RASTRILLO_HOME` en tempdir.
 
