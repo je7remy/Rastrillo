@@ -127,6 +127,15 @@ button:focus-visible,
    confianza), donde los 28px del chip normal desmontan la fila. */
 .chip-xs{height:20px;padding:0 8px;font-size:11px;background:var(--surface-2)}
 .row-reasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+/* Detalle de una brecha HIBP (fecha · magnitud · tipos de dato expuestos).
+   Reusa .chip-xs: son chips informativos dentro de la fila, igual que los
+   motivos de confianza. El acento solo distingue la categoría de dato del
+   resto de chips; la información no depende del color. */
+.breach-detail{margin-top:5px;font-size:11.5px;color:var(--text-3)}
+.breach-meta{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.breach-classes{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:4px}
+.breach-classes-h{color:var(--text-3);margin-right:2px}
+.chip-data{border-color:var(--warn);color:var(--warn-text);background:var(--warn-bg)}
 .chip-toggle{border-style:dashed;cursor:pointer;color:var(--text-3)}
 .chip-toggle:hover{color:var(--text-2);border-color:var(--border-strong)}
 .chip-toggle.on{

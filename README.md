@@ -54,6 +54,8 @@
 
 - 🔍 **Descubrimiento multi-fuente** — Sherlock + Holehe siempre; Maigret y HaveIBeenPwned opcionales.
 - 🧩 **Resolver por capas** — recetas JSON → directorio JustDeleteMe → web search IA → sondeo de paths → agente IA → borrador GDPR.
+- 🐦 **Canario de verificabilidad** — pregunta a cada sitio por dos usuarios inventados para detectar los que responden igual a cualquiera. Marca el sitio como no verificable **sin tocar la confianza**: que no se pueda comprobar nada allí no dice que la cuenta no sea tuya.
+- 🗂️ **Memoria de descartes** — cuando dices "no es mía", se recuerda el par (sitio, identificador). Sobrevive a limpiar los hallazgos, así que no re-trías los mismos falsos positivos en cada escaneo. Reversible con un clic.
 - 🖥️ **Dashboard local** — FastAPI + estática en `http://127.0.0.1:8765` con token de auth.
 - 🌍 **Plantillas GDPR en 6 idiomas** — EN, ES, RU, PT-BR, FR, DE, con detección por TLD.
 - 🧑‍✈️ **Human-in-the-loop** — CAPTCHA, 2FA y confirmaciones se pasan al usuario.
@@ -78,7 +80,10 @@ flowchart LR
     DISC --> MA[Maigret]
     DISC --> HI[HIBP]
     DISC --> DB[(SQLite)]
-    D --> RES[Resolver por capas]
+    DISC --> CAN[Canario · verificabilidad]
+    CAN --> DB
+    CAN --> RES[Resolver por capas]
+    D --> RES
     RES -->|1| REC[Recetas JSON]
     RES -->|2| DIR[Directorio JustDeleteMe]
     RES -->|3| WS[Web search · Anthropic]
@@ -90,6 +95,13 @@ flowchart LR
     ENG --> CR[Chromium persistente]
     CR -.CAPTCHA/2FA.-> U
 ```
+
+Tras el discovery y **antes** del auto-resolver corre el **canario**: pregunta a
+cada sitio por dos usuarios inventados y marca los que responden igual a
+cualquiera. Va en ese orden a propósito — así el auto-resolver no gasta
+peticiones planificando el borrado de sitios recién invalidados, y la URL del
+hit todavía es la plantilla que el canario necesita. Escribe en `verifiability`,
+**nunca en `confidence`**: son ejes distintos.
 
 El resolver prueba las capas en orden y se queda con la primera accionable.
 Cada cuenta termina con una `Resolution` de tipo `auto` (motor lo hace
@@ -428,8 +440,10 @@ rastrillo/
 │   ├── db.py               # SQLite + migraciones
 │   ├── discovery.py        # Wrappers Sherlock/Holehe/Maigret/HIBP
 │   ├── canario.py          # Canario a nivel de sitio (2 falsos, veredicto cacheado)
+│   ├── catalogo.py         # Catálogo de Sherlock (urlProbe + errorMsg por sitio)
 │   ├── directory.py        # Cliente JustDeleteMe
 │   ├── resolver.py         # Resolver por capas
+│   ├── netguard.py         # Criterio anti-SSRF (única definición, compartida)
 │   ├── recipes.py          # Loader de recetas JSON
 │   ├── recipes_auto.py     # Recetas auto-aprendidas
 │   ├── engine.py           # Motor Playwright
@@ -447,10 +461,14 @@ rastrillo/
 │   ├── recipes/            # Recetas de ejemplo
 │   └── static/             # Frontend (index.html + css + js)
 │
-├── tests/                  # 468 tests con unittest stdlib
+├── tests/                  # 540 tests con unittest stdlib
 │   ├── test_informe_pdf.py     # El informe PDF (estructura, Unicode, volumen)
+│   ├── test_informe_http.py    # La DESCARGA del informe (transporte, no generador)
 │   ├── test_confidence_signals.py  # Confianza y falsos positivos (offline)
 │   ├── test_canario.py         # Canario a nivel de sitio (offline, red mockeada)
+│   ├── test_netguard.py        # El criterio anti-SSRF y sus dos envoltorios
+│   ├── test_hibp_extra.py      # Detalle de la brecha (fecha, magnitud, datos)
+│   ├── test_deuda_httpx2.py    # Vigilancia del aviso silenciado de httpx2
 │   ├── test_url_del_hit.py     # Frontera `@ ~ #` + la URL del hit en el triage
 │   ├── test_domain_intel.py    # Domain Intelligence (offline, red mockeada)
 │   └── test_resolve_tool.py    # Capa de web search del resolver
@@ -462,7 +480,7 @@ rastrillo/
 
 ## ⚙️ Variables de entorno
 
-Las 19 reales del código:
+Las 21 reales del código:
 
 | Variable | Default | Para qué |
 |---|---|---|
@@ -484,6 +502,8 @@ Las 19 reales del código:
 | `RASTRILLO_SHERLOCK_SITE_TIMEOUT` | `60` | Timeout per-site de Sherlock (mín 10 s) |
 | `RASTRILLO_HOLEHE_TIMEOUT` | `600` | Timeout global de Holehe (mín 10 s) |
 | `RASTRILLO_MAIGRET_TIMEOUT` | `300` | Timeout global de Maigret (mín 10 s) |
+| `RASTRILLO_WHOIS_TIMEOUT` | `10` | Segundos por consulta WHOIS (Inteligencia de dominio) |
+| `RASTRILLO_DNS_TIMEOUT` | `5` | Segundos por tipo de registro DNS (Inteligencia de dominio) |
 | `RASTRILLO_AUDIT_MAX_BYTES` | `5242880` (5 MiB) | Tamaño que dispara rotación del audit |
 
 ---
@@ -524,6 +544,7 @@ Todo bajo `~/.rastrillo/` (`%USERPROFILE%\.rastrillo\` en Windows):
 | `rastrillo.db` | SQLite: cuentas, eventos, informes de dominio y **memoria de descartes** |
 | `directory.json` | Copia local de JustDeleteMe |
 | `discovered.json` | Caché del resolver por host |
+| `canario.json` | Veredictos del canario por sitio (TTL de 30 días) |
 | `browser-profile/` | Perfil de Chromium con tus sesiones |
 | `backups/` | Snapshots automáticos antes de borrados masivos |
 | `audit.json` | Log append-only de acciones destructivas |
@@ -573,8 +594,8 @@ IA recibe estructura de página (árbol de accesibilidad + texto visible),
 .venv/bin/python -m unittest discover -t . -s tests -v
 ```
 
-Suite con `unittest` de stdlib, sin dependencias nuevas. **430 tests**
-(~1,5 minutos en Windows, ~40 s en Linux). Cada test corre con su propio
+Suite con `unittest` de stdlib, sin dependencias nuevas. **540 tests**
+(~2,5 minutos en Windows, ~1 minuto en Linux). Cada test corre con su propio
 `RASTRILLO_HOME` en tempdir.
 
 Para validar el motor sin entrar a webs reales, mira

@@ -55,8 +55,41 @@ class IsolatedTestCase(unittest.TestCase):
 
 
 def auth_client():
-    """Devuelve un TestClient de FastAPI ya importado tras el sandbox."""
-    from fastapi.testclient import TestClient
+    """Devuelve un TestClient de FastAPI ya importado tras el sandbox.
+
+    El `catch_warnings` silencia UN aviso concreto (Paso 5, Entrega 1):
+
+        StarletteDeprecationWarning: Using `httpx` with `starlette.testclient`
+        is deprecated; install `httpx2` instead.
+
+    Este es el ÚNICO punto del proyecto que importa testclient, así que es el
+    único sitio donde hay que ponerlo. Tiene que ser un `catch_warnings` local
+    y no un `filterwarnings` global: `unittest.TextTestRunner.run` ejecuta
+    `warnings.simplefilter(self.warnings)`, que borra la lista de filtros
+    entera, así que cualquier filtro instalado al importar habría desaparecido
+    para cuando corre esta función.
+
+    Por qué se silencia en vez de instalar httpx2: starlette >= 1.3 intenta
+    `import httpx2` y SOLO si falla cae a `httpx` y avisa — es un fallback
+    blando, sin fecha de retirada anunciada. Afecta exclusivamente a los tests
+    (ningún módulo de `rastrillo/` importa testclient) y añadir la dependencia
+    obligaría a tocar `requirements.lock`, que el invariante 8 prohíbe
+    regenerar por cuenta propia.
+
+    Por qué esto NO oculta la rotura futura: el filtro casa por MENSAJE, así
+    que cualquier otro aviso de starlette se sigue viendo; y el día que
+    starlette retire el soporte de `httpx` no emite un aviso sino un
+    `RuntimeError`, que ningún filtro tapa. `test_deuda_httpx2.py` vigila las
+    dos cosas.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*`httpx` with `starlette\.testclient` is deprecated.*",
+            category=UserWarning,   # StarletteDeprecationWarning hereda de él
+        )
+        from fastapi.testclient import TestClient
     from rastrillo.server import app
     return TestClient(app)
 

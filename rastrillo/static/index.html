@@ -37,18 +37,20 @@
     <button id="dir-refresh" class="btn btn-icon btn-ghost"
             aria-label="Refrescar directorio"
             title="Refrescar directorio"></button>
-    <a id="report-csv-btn" class="btn btn-sm btn-ghost"
-       href="/api/report?format=csv" download
-       title="Descargar informe en CSV (apto para análisis)">
+    <!-- Botones, NO <a href download>. Un ancla no puede mandar la cabecera
+         X-Rastrillo-Token, así que la descarga salía sin auth y el 401 (JSON)
+         acababa guardado como si fuera el informe. La descarga la hace
+         `descargarInforme()` en app.js: fetch con token → Blob → enlace local. -->
+    <button id="report-csv-btn" class="btn btn-sm btn-ghost" type="button"
+            title="Descargar informe en CSV (apto para análisis)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
       CSV
-    </a>
-    <a id="report-pdf-btn" class="btn btn-sm btn-ghost"
-       href="/api/report?format=pdf" download
-       title="Descargar informe en PDF (listo para imprimir/archivar)">
+    </button>
+    <button id="report-pdf-btn" class="btn btn-sm btn-ghost" type="button"
+            title="Descargar informe en PDF (listo para imprimir/archivar)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M9 13h6M9 17h4"/></svg>
       PDF
-    </a>
+    </button>
     <button id="theme-toggle" class="btn btn-icon btn-ghost"
             aria-label="Cambiar tema"
             title="Cambiar entre modo claro y oscuro"></button>

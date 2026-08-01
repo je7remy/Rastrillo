@@ -247,6 +247,57 @@ async function getJSON(url){
   return r.json();
 }
 
+/* Descarga de informes (/api/report?format=...).
+ *
+ * TIENE que ir por fetch. Antes esto eran dos <a href="/api/report?..." download>
+ * y no funcionaba: una navegación de ancla NO puede llevar cabeceras propias, así
+ * que la petición salía sin X-Rastrillo-Token, el auth_middleware la cortaba con
+ * un 401 (cuerpo JSON) y el atributo `download` guardaba ESE JSON de error en un
+ * fichero con extensión .pdf. Es decir: nunca se descargaba un PDF.
+ *
+ * La solución es pedir el binario con el token, recibirlo como Blob y disparar
+ * la descarga desde un objeto local. NO se toca el middleware ni se permite el
+ * token por query: el endpoint sigue exigiendo cabecera como todo /api/*. */
+function _nombreDeContentDisposition(cd, fmt){
+  /* El server manda `attachment; filename="rastrillo-<ts>.pdf"`. Si falta o no
+   * parsea, componemos uno equivalente en vez de dejar que el navegador invente
+   * un nombre a partir de la URL (saldría "report"). */
+  const m = /filename="?([^";]+)"?/i.exec(cd || "");
+  if(m && m[1]) return m[1];
+  const ts = new Date().toISOString().slice(0,19).replace(/[-:T]/g,"");
+  return `rastrillo-${ts}.${fmt}`;
+}
+
+async function descargarInforme(fmt, btn){
+  if(btn) btn.disabled = true;
+  let objUrl = null;
+  try{
+    const r = await getAPI(`/api/report?format=${encodeURIComponent(fmt)}`);
+    if(!r.ok){
+      /* Un error NUNCA se guarda como fichero: se cuenta. Ese era justo el
+       * síntoma viejo (un .pdf que por dentro era el JSON del 401). */
+      const d = await r.json().catch(()=>({}));
+      toast(d.detail || `No pude generar el informe (${r.status})`, 7000, "err");
+      return;
+    }
+    const blob = await r.blob();
+    const nombre = _nombreDeContentDisposition(r.headers.get("Content-Disposition"), fmt);
+    objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl; a.download = nombre;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast(`Informe descargado (${nombre})`);
+  }catch(e){
+    toast(e.message || "No pude descargar el informe", 7000, "err");
+  }finally{
+    /* revoke tras un tick: Firefox necesita que el click haya cursado. */
+    if(objUrl) setTimeout(()=>URL.revokeObjectURL(objUrl), 10000);
+    if(btn) btn.disabled = false;
+  }
+}
+
 /* ── Filtros ───────────────────────────────────────────── */
 function setFilter(name){
   CURRENT_FILTER=name;
@@ -440,6 +491,7 @@ function renderRow(a){
     <div class="row-main">
       <div class="row-title">${escapeHtml(a.display_name||a.platform)}${ownedMark}</div>
       <div class="row-meta">${id}${site}${link}${delLink}${sent}${deadlineMeta}</div>
+      ${breachDetail(a)}
       ${reasonChips(a)}
     </div>
     ${verif}
@@ -449,6 +501,116 @@ function renderRow(a){
     ${msg}
     ${deadlineBar}
   </div>`;
+}
+
+/* ── Detalle de la brecha (HIBP) ───────────────────────────────────────────
+ *
+ * HIBP devuelve por cada brecha la fecha, cuánta gente afectó y QUÉ TIPOS DE
+ * DATO se expusieron. Hasta el Paso 5 esos tres campos llegaban y se tiraban.
+ * El tercero es el que de verdad ayuda a decidir: no es lo mismo que se
+ * filtrara tu email que que se filtraran tus contraseñas.
+ *
+ * Es CONTEXTO, no una señal nueva: no toca la confianza (HIBP sigue entrando
+ * como `medium` por política) ni dispara ninguna acción. Solo informa. */
+
+/* Traducción de las categorías de dato. HIBP las manda en inglés y con nombres
+ * fijos, así que una tabla curada cubre la inmensa mayoría. Lo que NO esté en
+ * la tabla se muestra TAL CUAL en inglés: traducir a ojo una categoría que no
+ * conocemos sería inventarse qué se expuso, y eso es peor que un término en
+ * otro idioma. Mismo criterio que `pdf_fuentes.sanear`: no alterar el dato en
+ * silencio. */
+const DATA_CLASSES_ES = {
+  "Email addresses":"Direcciones de correo",
+  "Passwords":"Contraseñas",
+  "Usernames":"Nombres de usuario",
+  "IP addresses":"Direcciones IP",
+  "Names":"Nombres",
+  "Phone numbers":"Teléfonos",
+  "Physical addresses":"Direcciones postales",
+  "Dates of birth":"Fechas de nacimiento",
+  "Geographic locations":"Ubicación geográfica",
+  "Genders":"Género",
+  "Password hints":"Pistas de contraseña",
+  "Security questions and answers":"Preguntas de seguridad",
+  "Credit cards":"Tarjetas de crédito",
+  "Partial credit card data":"Datos parciales de tarjeta",
+  "Bank account numbers":"Números de cuenta bancaria",
+  "Social security numbers":"Números de seguridad social",
+  "Government issued IDs":"Documentos de identidad",
+  "Job titles":"Puestos de trabajo",
+  "Employers":"Empleadores",
+  "Website activity":"Actividad en el sitio",
+  "Purchases":"Compras",
+  "Private messages":"Mensajes privados",
+  "Chat logs":"Historiales de chat",
+  "Browser user agent details":"Datos del navegador",
+  "Device information":"Información del dispositivo",
+  "Spoken languages":"Idiomas",
+  "Time zones":"Zonas horarias",
+  "Avatars":"Avatares",
+  "Profile photos":"Fotos de perfil",
+  "Biographies":"Biografías",
+  "Nationalities":"Nacionalidades",
+  "Salutations":"Tratamientos",
+  "Age groups":"Grupos de edad",
+  "Instant messenger identities":"Identidades de mensajería",
+  "Social media profiles":"Perfiles de redes sociales",
+  "Account balances":"Saldos de cuenta",
+  "Auth tokens":"Tokens de autenticación",
+  "Security questions":"Preguntas de seguridad",
+  "Historical passwords":"Contraseñas antiguas",
+  "Recovery email addresses":"Correos de recuperación",
+  "Physical attributes":"Atributos físicos",
+  "Sexual orientations":"Orientación sexual",
+  "Religions":"Religión",
+  "Political views":"Opiniones políticas",
+};
+function dataClassLabel(c){
+  return DATA_CLASSES_ES[c] || c;   /* sin traducción inventada: el original */
+}
+
+/* Fecha de la brecha: HIBP la manda como "YYYY-MM-DD". Se pinta en formato
+ * local. Si no parsea, se muestra el original antes que un "Invalid Date". */
+function fmtBreachDate(s){
+  if(!s) return "";
+  const d = new Date(s + "T00:00:00Z");
+  if(isNaN(d.getTime())) return s;
+  return d.toLocaleDateString(undefined, {year:"numeric", month:"long", day:"numeric"});
+}
+
+/* Magnitud con separador de millares. `0` es un dato (una brecha registrada
+ * con recuento cero), así que se distingue de "no viene el campo". */
+function fmtPwnCount(n){
+  if(n === null || n === undefined || n === "") return "";
+  const num = Number(n);
+  if(!isFinite(num)) return "";
+  return num.toLocaleString();
+}
+
+function breachDetail(a){
+  const m = a.breach_meta;
+  if(!m || typeof m !== "object") return "";
+  const fecha = fmtBreachDate(m.breach_date);
+  const cuantos = fmtPwnCount(m.pwn_count);
+  const clases = Array.isArray(m.data_classes) ? m.data_classes : [];
+  if(!fecha && !cuantos && !clases.length) return "";
+
+  const meta = [];
+  if(fecha)   meta.push(`<span title="Fecha de la brecha según HIBP">Brecha de ${escapeHtml(fecha)}</span>`);
+  if(cuantos) meta.push(`<span title="Cuentas afectadas en total, no solo la tuya">${escapeHtml(cuantos)} cuentas afectadas</span>`);
+  const metaHtml = meta.length
+    ? `<div class="breach-meta">${meta.join('<span class="dot">·</span>')}</div>` : "";
+
+  /* Los tipos de dato como chips y no como volcado: es lo que se lee de un
+   * vistazo para decidir si esto importa o no. */
+  const chips = clases.map(c=>
+    `<span class="chip chip-xs chip-data" title="Tipo de dato expuesto en esta brecha">${escapeHtml(dataClassLabel(String(c)))}</span>`
+  ).join("");
+  const chipsHtml = chips
+    ? `<div class="breach-classes"><span class="breach-classes-h">Datos expuestos:</span>${chips}</div>`
+    : "";
+
+  return `<div class="breach-detail">${metaHtml}${chipsHtml}</div>`;
 }
 
 /* Chip de la señal agregada del sitio (Paso 3, Entrega 2).
@@ -1191,6 +1353,11 @@ $("dir-refresh").onclick=async()=>{
   } catch(e){ toast(e.message, 7000, "err"); }
   finally{ b.disabled=false; load(); }
 };
+
+/* Descarga de informes. Van por fetch+Blob para poder mandar el token; ver
+ * `descargarInforme`. */
+$("report-csv-btn").onclick=(e)=>descargarInforme("csv", e.currentTarget);
+$("report-pdf-btn").onclick=(e)=>descargarInforme("pdf", e.currentTarget);
 
 /* ── Domain Intelligence ──────────────────────────────────────
  * Recon OSINT defensivo sobre un dominio (WHOIS + DNS + correlación).

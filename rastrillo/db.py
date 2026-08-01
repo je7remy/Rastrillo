@@ -89,6 +89,7 @@ _ACCOUNTS_COLUMNS = [
     ("confidence", "TEXT", "high | medium | low (sherlock genera falsos positivos)"),
     ("confidence_reasons", "TEXT", "JSON [{code, desc}] con el POR QUÉ de la confianza"),
     ("verifiability", "TEXT", "veredicto del canario: ¿se puede verificar este sitio?"),
+    ("breach_meta", "TEXT", "JSON con el detalle de la brecha HIBP (fecha, magnitud, datos)"),
     ("owned", "INTEGER DEFAULT 0", "1 = el usuario confirmó 'es mía'; 0 = sin confirmar"),
     ("sent_at", "REAL", "timestamp UNIX de cuándo se envió la solicitud GDPR"),
     ("deletion_eta", "REAL", "timestamp UNIX objetivo: cuándo se elimina según la plataforma"),
@@ -290,6 +291,8 @@ def init():
             con.execute("ALTER TABLE accounts ADD COLUMN deletion_started_at REAL")
         if "verifiability" not in cols:
             con.execute("ALTER TABLE accounts ADD COLUMN verifiability TEXT")
+        if "breach_meta" not in cols:
+            con.execute("ALTER TABLE accounts ADD COLUMN breach_meta TEXT")
 
         # 4) Índices al final: aquí ya estamos seguros de que source_site existe.
         con.executescript(SCHEMA_INDEXES)
@@ -325,6 +328,35 @@ def parse_reasons(raw) -> list:
 def dump_reasons(reasons) -> str:
     """Serializa la lista de motivos (mismo patrón que `action_meta`)."""
     return json.dumps(reasons or [], ensure_ascii=False)
+
+
+# --- Detalle de la brecha (HIBP) --------------------------------------------
+# Mismo patrón de serialización que los motivos, pero un dict en vez de lista:
+# HIBP devuelve por cada brecha la fecha, cuánta gente afectó y QUÉ TIPOS DE
+# DATO se expusieron, y hasta el Paso 5 todo eso se tiraba en `_register`.
+#
+# Es contexto para el usuario, NO una señal nueva: la semántica de HIBP no
+# cambia (sigue siendo exposición en brecha, no cuenta activa, y sigue
+# entrando como `medium` por política). Nada de esto toca `confidence`.
+def parse_breach_meta(raw) -> dict:
+    """Lee la columna `breach_meta`. Nunca lanza: {} si falta o está corrupta.
+
+    Misma tolerancia que `parse_reasons`: mejor una tarjeta sin detalle que
+    una vista rota por una fila vieja.
+    """
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+    except (ValueError, TypeError):
+        _log.warning("breach_meta corrupto; lo ignoro")
+        return {}
+    return val if isinstance(val, dict) else {}
+
+
+def dump_breach_meta(meta) -> str:
+    """Serializa el detalle de la brecha (mismo patrón que `action_meta`)."""
+    return json.dumps(meta or {}, ensure_ascii=False)
 
 
 def merge_reasons(previos, nuevos) -> list:

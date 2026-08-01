@@ -218,16 +218,26 @@ class TestLegacySinUnique(_BaseLegacy):
 
     def test_no_se_reconstruye(self):
         """La tabla se migra por ALTER, no recreándola. Se nota en el ORDEN de
-        las columnas: un rebuild colocaría `verifiability` en su sitio del
-        esquema (entre `confidence_reasons` y `owned`), mientras que un ALTER
-        la deja al final."""
+        las columnas: un rebuild las colocaría en su sitio del esquema,
+        mientras que un ALTER las deja al final.
+
+        Cuál es la última se DERIVA de `init()`, no se escribe a mano: antes
+        estaba fijado el nombre de la que entonces cerraba la lista
+        (`verifiability`) y al añadir una columna nueva el test fallaba sin que
+        hubiera cambiado nada del comportamiento que mide. Misma técnica que
+        `TestNoRecaida` más abajo.
+        """
+        import inspect
+        import re
         self._crear(_LEGACY_SIN_UNIQUE, [self._fila()])
         antes = self._ddl()
         self.db.init()
         despues = self._ddl()
         self.assertTrue(despues.startswith(antes.strip().rstrip(")").rstrip()),
                         "el DDL original se conserva; solo se le añade")
-        self.assertEqual(self._cols()[-1], "verifiability",
+        anadidas = re.findall(r"ADD COLUMN (\w+)",
+                              inspect.getsource(self.db.init))
+        self.assertEqual(self._cols()[-1], anadidas[-1],
                          "añadida por ALTER al final, no por rebuild")
 
     def test_los_datos_siguen_ahi(self):

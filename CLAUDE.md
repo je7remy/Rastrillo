@@ -203,7 +203,17 @@ corroboradas (ver `hibp.py`).
 
 `rastrillo/hibp.py` — cliente mínimo de HaveIBeenPwned. Skipped en
 silencio si no hay API key. Convierte cada brecha confirmada en un hit
-con el dominio del sitio brechado. Las brechas con `Domain` vacío se
+con el dominio del sitio brechado. El `extra` de cada hit (seis campos:
+`breach_date`, `pwn_count`, `data_classes`, `is_verified`, `is_spam_list`,
+`is_fabricated`) **se persiste entero** desde el Paso 5 en la columna
+`accounts.breach_meta`; antes `_register` lo tiraba y era el único dato del
+proyecto que llegaba y se descartaba. Es CONTEXTO para el usuario, no una
+señal: no toca `confidence` (HIBP sigue `medium` por política), ni `no_site`,
+ni la corroboración. La UI lo pinta en la pestaña "Brechas" con fecha legible,
+magnitud con separadores y los tipos de dato como chips; `DATA_CLASSES_ES` en
+`app.js` traduce las categorías frecuentes y **muestra en inglés las que no
+conoce** — traducir a ojo una categoría desconocida sería inventarse qué se
+expuso (mismo criterio que `pdf_fuentes.sanear`). Las brechas con `Domain` vacío se
 DESCARTAN (no hay sitio al que ir a borrar): es el caso de los volcados
 agregados tipo "Collection #1". Las que sí traen dominio pero llevan
 `IsSpamList`, `IsFabricated` o `IsVerified=false` entran al discovery
@@ -297,6 +307,25 @@ host debe resolver a IPs públicas — rechaza loopback, privadas,
 link-local, reservadas y multicast. Si la URL no pasa, devuelve None
 y el caller sigue con la siguiente sin abortar el lote.
 
+`rastrillo/netguard.py` — **la definición ÚNICA del criterio anti-SSRF**
+(Paso 5). Antes estaba escrita dos veces, en `resolver._is_safe_url` y en
+`domain_intel._host_resolves_public`, con el bucle de comprobación de IPs
+idéntico byte a byte. Expone `ip_publica(ip)`, `host_es_publico(host, puerto)`
+y `url_es_segura(url)`, y aloja el aviso del TOCTOU conocido y aceptado. Las
+dos funciones de antes siguen existiendo como **envoltorios finos** con sus
+firmas y semánticas intactas (una exige `https://`, la otra valida un host a
+secas para TCP/43), y `canario._url_segura_por_defecto` apunta al helper.
+
+Tres reglas que NO se pueden romper sin cargarse cinco ficheros de tests:
+`netguard` llama a `socket.getaddrinfo` como **atributo del módulo** (los
+tests parchean `socket.getaddrinfo` global; un `from socket import ...`
+capturaría la referencia y los mocks dejarían de aplicar, con la suite
+haciendo DNS de verdad); los dos envoltorios siguen siendo **funciones a nivel
+de módulo** y no alias de import (varios tests hacen
+`patch.object(modulo, "_is_safe_url")`); y dentro de `resolver` las llamadas
+son al nombre pelado `_is_safe_url(url)`, para que esos parches surtan efecto.
+`engine.py:85` lo llama cross-module y por eso no hubo que tocarlo.
+
 `rastrillo/hostutil.py` — normalización de host / slug compartida.
 Tres funciones con semánticas distintas (a propósito): `slugify` para
 casar recetas, `host_from_url` (con strip + corte de querystring) y
@@ -370,8 +399,24 @@ barrería el descarte masivo; alimenta el conteo exacto del modal),
 `POST /api/accounts/clear`,
 `GET/POST /api/dry-run`,
 `GET /api/onboarding`, `POST /api/onboarding/dismiss`,
-`GET /api/report?format=json|csv|pdf`,
+`GET /api/report?format=json|csv|pdf` (ver aviso abajo),
 `GET /api/accounts/{id}/followup-draft`.
+
+**La descarga de informes NO puede ir por un `<a href download>`** (Paso 5).
+Lo estuvo, y no funcionaba: el middleware exige token en todos los `/api/*`,
+una navegación de ancla no puede mandar cabeceras propias, así que la petición
+salía sin `X-Rastrillo-Token`, el 401 devolvía JSON y el atributo `download`
+guardaba **ese JSON de error** en un fichero con nombre de PDF. El endpoint y
+`report_pdf` siempre estuvieron bien; el fallo era de presentación. Hoy los dos
+botones llaman a `descargarInforme()` en `app.js`: fetch con token → `Blob` →
+enlace local, y un error se muestra como aviso en vez de guardarse como
+fichero. `tests/test_informe_http.py` cubre el transporte y **rechaza cualquier
+`<a>` que apunte a `/api/report`** en el HTML. No se arregla relajando la auth:
+ni token por query, ni excepciones de ruta en el middleware.
+
+Lección de por qué se coló: la única prueba de informes que había llamaba a
+`reports.build_report()` **directamente**. Se probaba el generador y nunca el
+transporte, y el bug vivía justo ahí.
 
 `rastrillo/jobs.py` — coordinación servidor <-> motor. Cola del worker
 Playwright (siempre un worker único; no abrimos N Chromiums). Pool
@@ -514,6 +559,32 @@ todo con confirmación. El estado plegado se recuerda por dominio en
 (`record(action, account)` serializa un snapshot de cuenta). Decisión de
 dependencias justificada en la cabecera del módulo.
 
+## Deuda vigilada
+
+**El aviso de `httpx2`.** `starlette >= 1.3` intenta `import httpx2` en
+`starlette.testclient` y, solo si falla, cae a `httpx` y emite
+`StarletteDeprecationWarning`. Se silencia en UN punto —
+`tests/helpers.auth_client`, que es el único sitio del proyecto que importa
+testclient— y allí está escrito el análisis completo.
+
+Tiene que ser un `catch_warnings` **local**: `unittest.TextTestRunner.run`
+ejecuta `warnings.simplefilter(...)`, que reemplaza la lista de filtros
+entera, así que un `filterwarnings` global a nivel de import no sobrevive al
+arranque del runner. Si alguien lo mueve a `tests/__init__.py`, el aviso vuelve
+(y hay una nota allí explicándolo).
+
+**No oculta la rotura futura** y por eso se puede vivir con ello: el filtro casa
+por MENSAJE (cualquier otro aviso de starlette se sigue viendo), y el día que
+starlette retire el soporte de `httpx` no emitirá un aviso sino un
+`RuntimeError`, que ningún filtro tapa. `tests/test_deuda_httpx2.py` vigila las
+dos cosas y además comprueba que **ningún módulo de `rastrillo/` importe
+testclient**: mientras eso se cumpla, la deuda vive entera en los tests y no
+toca el runtime.
+
+Qué hacer si algún día vence: instalar `httpx2` y actualizar `requirements` +
+`requirements.lock` **en el mismo cambio**. Es decisión del mantenedor
+(invariante 8), no una tarea que se pueda tomar por cuenta propia.
+
 ## Convenciones
 
 Código y comentarios en español. Sin dependencias nuevas salvo que sean
@@ -651,6 +722,28 @@ Archivos:
   escapa ANTES de romper líneas, y el preview del descarte masivo (conteo
   exacto, no escribe, pide token, y coincide con lo que el POST acaba
   escribiendo).
+- `tests/test_informe_http.py` — Paso 5: la DESCARGA del informe por HTTP, que
+  es el hueco que dejó pasar el bug (se probaba el generador, nunca el
+  transporte). Los tres formatos con su `Content-Type`, el antirregresión
+  explícito de que un `format=pdf` **no puede** responder JSON, el
+  `Content-Disposition`, el 401 sin token que no filtra ni PDF ni datos, y un
+  barrido del HTML que rechaza cualquier `<a href>` a `/api/report`.
+- `tests/test_netguard.py` — Paso 5: el criterio anti-SSRF único. El predicado
+  por familias de IP, los dos envoltorios, que basta UNA dirección no pública
+  para rechazar (un host que resuelve a pública + loopback), que el esquema se
+  mira antes que el DNS, y un barrido de equivalencia que fija que el refactor
+  no cambió ni una decisión. Más los tres tests que protegen la parcheabilidad
+  de la que dependen otros cinco ficheros.
+- `tests/test_hibp_extra.py` — Paso 5: el detalle de la brecha. Round-trip por
+  la ruta real (discovery → DB → API), `data_classes` ausente o vacío,
+  `pwn_count` cero vs ausente, `breach_meta` corrupto que no tumba la vista,
+  migración sobre una DB anterior al paso, y cinco tests de que **la semántica
+  de HIBP no se movió** (sigue `medium`, mismos motivos, sin motivos nuevos).
+- `tests/test_deuda_httpx2.py` — Paso 5: vigilancia del aviso silenciado. Que
+  `starlette.testclient` siga importando (la rotura real es un `RuntimeError`),
+  que el filtro no se coma otros avisos, que el runtime no dependa de
+  testclient, y —en un SUBPROCESO, única forma de comprobarlo de verdad— que el
+  aviso no salga por stderr.
 - `tests/test_domain_intel.py` — Domain Intelligence offline: parseo
   WHOIS recursivo y DNS desde fixtures (primitivas de red mockeadas),
   reglas de correlación (MX→Google, NS→Cloudflare, SPF, verificaciones
@@ -680,7 +773,7 @@ Archivos:
   Se verificó que sin el tope revienta con `LayoutError`; con nombres cortos
   el caso quedaba a un 5% del límite y pasaba desapercibido.
 
-Alrededor de 468 tests en poco más de un minuto. Antes de cualquier cambio
+Alrededor de 540 tests en poco más de dos minutos. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -711,6 +804,8 @@ Eso es lo que hace `test_engine_html_local.py`.
 | `RASTRILLO_MAIGRET_TIMEOUT` | 300 | Timeout global de Maigret |
 | `RASTRILLO_WHOIS_TIMEOUT` | 10 | Segundos por consulta WHOIS (Domain Intelligence) |
 | `RASTRILLO_DNS_TIMEOUT` | 5 | Segundos por tipo de registro DNS (Domain Intelligence) |
+| `RASTRILLO_AI_TOKEN_BUDGET` | 8000 | Presupuesto de tokens por bucle del agente IA |
+| `RASTRILLO_AI_SCREENSHOTS` | 0 (off) | `>0` activa screenshot opcional por turno del agente |
 | `RASTRILLO_AUDIT_MAX_BYTES` | 5242880 | Tamaño que dispara rotación |
 
 ## Estado actual

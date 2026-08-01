@@ -15,11 +15,9 @@ Invariantes:
   - Funciona sin ANTHROPIC_API_KEY (salta capas 2 y 4; cae a 3 o 5).
 """
 from __future__ import annotations
-import ipaddress
 import json
 import logging
 import re
-import socket
 import threading
 import time
 import urllib.error
@@ -29,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from . import ai_assist, config, directory
+from . import ai_assist, config, directory, netguard
 
 log = logging.getLogger("rastrillo.resolver")
 
@@ -169,51 +167,18 @@ def detect_language(host: str) -> str:
 
 # --- HTTP helper -------------------------------------------------------------
 def _is_safe_url(url: str) -> bool:
-    """Allowlist anti-SSRF para `_http_get`.
+    """Allowlist anti-SSRF para `_http_get`. Envoltorio de `netguard`.
 
-    Reglas:
-      - Solo `https://`. Bloqueamos http/file/ftp/gopher/etc.
-      - El host debe resolver a IPs PÚBLICAS exclusivamente. Cualquier IP
-        privada / loopback / link-local / reserved / multicast → no pasa.
-        Esto cubre 127.0.0.1, 10.x, 192.168.x, 169.254.x, IPv6 link-local,
-        etc.; suficiente para nuestro modelo de amenaza (resolver corre en
-        local del usuario y solo debe tocar internet, nunca hablar con el
-        propio dashboard ni con la red interna del usuario).
+    La definición del criterio (solo https + el host resuelve solo a IPs
+    públicas) y el aviso del TOCTOU viven en `rastrillo/netguard.py` desde el
+    Paso 5: estaba escrita dos veces, aquí y en `domain_intel`, con el bucle
+    de comprobación idéntico byte a byte.
 
-    Aviso (TOCTOU): hay una ventana entre resolver el host y abrir la
-    conexión; un DNS rebinding podría devolver IP pública aquí y privada
-    a la hora de conectar. Para este modelo (local, single-user, la
-    respuesta solo alimenta una regex de emails) es aceptable; cerrarlo
-    requeriría un urlopen custom que pase la IP ya validada.
+    Se mantiene como función del módulo —y no como un `from netguard import`—
+    porque varios tests hacen `patch.object(resolver, "_is_safe_url", ...)`
+    y `engine.py` lo llama cross-module; un alias de import rompería ambos.
     """
-    try:
-        parsed = urllib.parse.urlsplit(url)
-    except Exception:
-        return False
-    if parsed.scheme != "https":
-        log.debug("SSRF guard: esquema no permitido %s en %s", parsed.scheme, url)
-        return False
-    host = parsed.hostname
-    if not host:
-        return False
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError as e:
-        log.debug("SSRF guard: no resuelve %s: %s", host, e)
-        return False
-    for info in infos:
-        sockaddr = info[4]
-        ip_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            log.debug("SSRF guard: IP no parseable %s para %s", ip_str, host)
-            return False
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            log.debug("SSRF guard: rechazo %s -> %s (IP no pública)", host, ip)
-            return False
-    return True
+    return netguard.url_es_segura(url)
 
 
 # Motivos por los que un GET no devuelve cuerpo. Existen porque `_http_get`

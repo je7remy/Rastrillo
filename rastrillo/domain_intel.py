@@ -43,10 +43,11 @@ Egress (documentado en TRANSPARENCIA.md): servidores WHOIS (TCP/43, vía
 referencia de IANA) y el resolutor DNS del sistema (vía dnspython, UDP/TCP 53).
 La correlación NO hace HTTP extra: solo interpreta los registros ya obtenidos,
 así que no abre ninguna vía de red nueva ni necesita el guard anti-SSRF.
-Las consultas WHOIS sí pasan por un guard (`_host_resolves_public`) calcado
-del criterio de `resolver._is_safe_url`: antes de abrir el socket 43
-verificamos que el servidor resuelve solo a IPs públicas, para que una
-referencia maliciosa no nos haga hablar con la red interna del usuario.
+Las consultas WHOIS sí pasan por un guard (`_host_resolves_public`), que desde
+el Paso 5 es un envoltorio de `rastrillo/netguard.py` — la definición única del
+criterio anti-SSRF, compartida con `resolver._is_safe_url`. Antes de abrir el
+socket 43 verificamos que el servidor resuelve solo a IPs públicas, para que
+una referencia maliciosa no nos haga hablar con la red interna del usuario.
 
 API pública:
   lookup_whois(domain) -> {registrar, created, expires, updated, status,
@@ -58,13 +59,14 @@ API pública:
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
 import os
 import re
 import socket
 import time
 from typing import List, Optional
+
+from . import netguard
 
 log = logging.getLogger("rastrillo.domain_intel")
 
@@ -107,32 +109,19 @@ def _normalize(domain: str) -> str:
 
 # --- Guard anti-SSRF para el socket WHOIS -----------------------------------
 def _host_resolves_public(host: str) -> bool:
-    """¿`host` resuelve EXCLUSIVAMENTE a IPs públicas?
+    """¿`host` resuelve EXCLUSIVAMENTE a IPs públicas? Envoltorio de `netguard`.
 
-    Mismo criterio que `resolver._is_safe_url` pero para TCP/43: antes de
-    abrir el socket a un servidor WHOIS (que descubrimos siguiendo una
-    referencia y por tanto no controlamos del todo) verificamos que no
-    apunte a loopback / privadas / link-local / reservadas / multicast.
-    Así una referencia envenenada no nos hace hablar con la red interna.
+    Se aplica antes de abrir el socket a un servidor WHOIS (que descubrimos
+    siguiendo una referencia y por tanto no controlamos del todo): así una
+    referencia envenenada no nos hace hablar con la red interna.
+
+    El criterio es el mismo que usa `resolver._is_safe_url` para las URLs, y
+    desde el Paso 5 hay UNA sola implementación (`rastrillo/netguard.py`);
+    antes estaba copiado aquí con el bucle idéntico byte a byte. Lo que sigue
+    siendo distinto —y por eso son dos funciones— es que aquí se valida un
+    host a secas, sin exigir esquema, y se resuelve contra el puerto 43.
     """
-    if not host:
-        return False
-    try:
-        infos = socket.getaddrinfo(host, 43)
-    except OSError as e:
-        log.debug("WHOIS guard: %s no resuelve: %s", host, e)
-        return False
-    for info in infos:
-        ip_str = info[4][0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            return False
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            log.debug("WHOIS guard: rechazo %s -> %s (IP no pública)", host, ip)
-            return False
-    return True
+    return netguard.host_es_publico(host, 43, etiqueta="WHOIS guard")
 
 
 # --- Primitiva de red WHOIS (mockeable en tests) ----------------------------

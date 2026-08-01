@@ -70,9 +70,9 @@ Alcance y red:
   - Solo hits CON `url`. Eso excluye estructuralmente holehe y hibp, que nunca
     la traen: ni una petición para esas dos fuentes.
   - Exactamente 2 peticiones por sitio no cacheado. Ninguna al perfil real.
-  - La guarda anti-SSRF es la de `resolver._is_safe_url` (precedente
-    cross-module en `engine.py`); el throttle por dominio y el timeout salen
-    de `resolver._http_get`, o sea `RASTRILLO_PROBE_DELAY`.
+  - La guarda anti-SSRF es la de `netguard.url_es_segura`, la definición única
+    del criterio (la comparte `resolver._is_safe_url`); el throttle por dominio
+    y el timeout salen de `resolver._http_get`, o sea `RASTRILLO_PROBE_DELAY`.
   - Las dos primitivas de red (`http_get`, `url_segura`) son inyectables por
     parámetro, como `_whois_query`/`_dns_query` en `domain_intel.py`: los
     tests no tocan internet.
@@ -355,8 +355,14 @@ def _normalizar_respuesta(r) -> tuple:
 
 
 def _url_segura_por_defecto(url: str) -> bool:
-    from . import resolver
-    return resolver._is_safe_url(url)
+    """La guarda anti-SSRF por defecto: la definición única de `netguard`.
+
+    Antes pasaba por `resolver._is_safe_url`, que desde el Paso 5 es a su vez
+    un envoltorio de esto mismo. Se apunta al helper directamente para no
+    encadenar dos indirecciones por la misma comprobación.
+    """
+    from . import netguard
+    return netguard.url_es_segura(url)
 
 
 def analizar_sitio(url: str, identificador: str, tokens=None,

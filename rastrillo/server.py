@@ -250,6 +250,10 @@ def api_accounts():
         # Motivos de la confianza: la columna guarda JSON (como action_meta);
         # la UI recibe la lista ya parseada para no repetir el json.parse.
         d["confidence_reasons"] = db.parse_reasons(d.get("confidence_reasons"))
+        # Detalle de la brecha HIBP (fecha, magnitud, tipos de dato expuestos).
+        # Mismo trato que los motivos: la columna guarda JSON y la UI lo recibe
+        # ya parseado. {} cuando la fila no viene de HIBP.
+        d["breach_meta"] = db.parse_breach_meta(d.get("breach_meta"))
         # URL de BORRADO (directorio/resolver), separada de `profile_url`, que
         # es la URL del HIT. Antes el resolver pisaba `profile_url` y el triage
         # enseñaba una URL de borrado bajo la etiqueta "perfil", contradiciendo

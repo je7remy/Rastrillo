@@ -29,9 +29,19 @@ optdepends=(
     'maigret: cobertura extendida por username (pip install maigret)'
 )
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
-# El tarball del tag de GitHub es el source canónico. Cuando OWNER/repo
-# tenga tag v$pkgver creado, descomenta este `source` y genera el
-# checksum: `makepkg -g >> PKGBUILD`. Mientras tanto se queda como SKIP.
+# El tarball que GitHub genera para el tag es el source canónico. La línea
+# `source` ya es la definitiva y NO hay que tocarla.
+#
+# `sha256sums` sigue en 'SKIP' porque el checksum depende del tarball, y ese
+# tarball no existe hasta que la tag esté empujada. En cuanto lo esté:
+#
+#     cd packaging/aur
+#     makepkg -g                        # imprime la línea sha256sums=(...)
+#     # sustituye el 'SKIP' de abajo por lo que imprima
+#     makepkg --printsrcinfo > .SRCINFO # regenera los metadatos del AUR
+#
+# Mientras siga en 'SKIP' el paquete se construye, pero sin verificar la
+# integridad de la descarga: no publicar en el AUR así.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

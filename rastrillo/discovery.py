@@ -758,6 +758,22 @@ def discover(usernames, emails):
             confidence=confidence,
             confidence_reasons=db.dump_reasons(motivos),
         )
+
+        # Detalle de la brecha (Paso 5). HIBP ya traía fecha, magnitud y tipos
+        # de dato expuestos por cada brecha, y hasta ahora se descartaban aquí:
+        # era el único dato del proyecto que llegaba y se tiraba. Se guarda tal
+        # cual llega, sin recortar campos.
+        #
+        # Es CONTEXTO, no una señal: no toca `confidence` (sigue `medium` por
+        # política), ni `no_site`, ni la corroboración. Solo alimenta la
+        # pestaña "Brechas" para que se pueda decidir con la información que
+        # de verdad ayuda: qué tipo de dato tuyo se expuso.
+        #
+        # `meta_brecha` y no `extra`: ese nombre ya lo usa arriba el motivo del
+        # descarte recordado.
+        meta_brecha = hit.get("extra")
+        if source == "hibp" and isinstance(meta_brecha, dict) and meta_brecha:
+            fields["breach_meta"] = db.dump_breach_meta(meta_brecha)
         if recipe:
             fields["deletion_type"] = recipe.get("deletion_type", "unknown")
             fields["difficulty"] = recipe.get("difficulty")
