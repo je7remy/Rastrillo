@@ -9,7 +9,7 @@ Modos:
   rastrillo                                arranca el dashboard y abre el navegador (default)
   rastrillo scan --user X [--email Y]      descubre cuentas en headless (sin UI)
   rastrillo list [--status STATUS]         lista las cuentas conocidas
-  rastrillo report --format json|csv|pdf --out FILE
+  rastrillo report --format json|csv|xlsx|pdf --out FILE
                                            genera el informe completo a fichero
   rastrillo canario URL|HOST [--user U]    (debug) ¿este sitio sabe decir que un
                                            usuario no existe? Vuelca la evidencia
@@ -148,7 +148,8 @@ def cmd_report(args):
 
     fmt = args.format.lower()
     try:
-        content, _media, _filename = reports.build_report(fmt)
+        content, _media, _filename = reports.build_report(
+            fmt, getattr(args, "sep", None))
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -329,11 +330,16 @@ def build_parser() -> argparse.ArgumentParser:
     sl.set_defaults(func=cmd_list)
 
     sr = sub.add_parser("report",
-        help="exporta el informe completo a un fichero (json/csv/pdf)")
-    sr.add_argument("--format", required=True, choices=("json", "csv", "pdf"),
+        help="exporta el informe completo a un fichero (json/csv/xlsx/pdf)")
+    sr.add_argument("--format", required=True,
+        choices=("json", "csv", "xlsx", "pdf"),
         help="formato de salida")
     sr.add_argument("--out", required=True,
         help="ruta del fichero de salida (se crean los directorios padres)")
+    sr.add_argument("--sep", default=None,
+        help="(solo csv) separador de columnas; por defecto la coma de RFC "
+             "4180. Usa ';' si tu Excel es de configuración regional europea "
+             "y te lo apila todo en una columna")
     sr.set_defaults(func=cmd_report)
 
     sc2 = sub.add_parser("canario",

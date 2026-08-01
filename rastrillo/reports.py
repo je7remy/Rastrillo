@@ -1,4 +1,4 @@
-"""Generación de informes en JSON / CSV / PDF.
+"""Generación de informes en JSON / CSV / XLSX / PDF.
 
 Antes la lógica vivía dentro del endpoint `/api/report` en `server.py`;
 Tarea 11 la sacó aquí para que tanto el endpoint como el CLI (`rastrillo
@@ -7,20 +7,40 @@ informes idénticos.
 
 `build_report(fmt)` devuelve:
   - (bytes,      "text/csv; charset=utf-8",            "rastrillo-<ts>.csv")
+  - (bytes,      "application/vnd.openxmlformats-...", "rastrillo-<ts>.xlsx")
   - (bytes,      "application/pdf",                    "rastrillo-<ts>.pdf")
   - (dict,       "application/json",                   "rastrillo-<ts>.json")
 
 El caller decide qué hacer con el contenido (devolverlo por HTTP o
 escribirlo a un fichero).
+
+Los cuatro formatos NO son cuatro vistas distintas de los datos: `json` es el
+volcado crudo, `pdf` es el documento para archivar, y `csv`/`xlsx` comparten
+columnas, orden y traducciones porque los dos salen de `tabular.py`. Ver la
+cabecera de ese módulo para el porqué.
+
+Reparto de papeles entre csv y xlsx (Paso 6): el **CSV es para procesar** —RFC
+4180, coma, sin adornos, que lo lea otro programa— y el **XLSX es para mirar**,
+con tipos, anchos, filtros y una hoja de resumen. Intentar que el CSV fuera las
+dos cosas es lo que lo tenía ilegible.
 """
 from __future__ import annotations
+import codecs
 import csv as _csv
 import io
 import json
 import time as _t
-from typing import Any, Dict, List, Tuple, Union
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from . import audit, db
+from . import audit, config, db, tabular
+
+# Formatos que acepta `build_report`. En un solo sitio para que el endpoint, el
+# CLI y el mensaje de error digan lo mismo.
+FORMATOS = ("json", "csv", "xlsx", "pdf")
+
+MEDIA_XLSX = ("application/vnd.openxmlformats-officedocument"
+              ".spreadsheetml.sheet")
 
 
 def deletion_url(action_meta, profile_url) -> Any:
@@ -93,42 +113,101 @@ def _summary(enriched: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, 
     }, by_action
 
 
-_CSV_COLS = [
-    "id", "platform", "display_name", "source", "source_site",
-    "identifier", "profile_url", "status", "confidence", "owned",
-    "deletion_type", "difficulty", "resolver_layer", "resolver_kind",
-    "email_to", "email_subject",
-    "updated_at", "sent_at", "days_since_sent", "last_message",
-]
+def _celda_csv(valor: Any, incidencias: tabular.Incidencias) -> str:
+    """Un valor tipado de `tabular.proyectar` → la cadena que va al CSV.
+
+    El CSV no tiene tipos, así que aquí es donde las fechas se vuelven texto y
+    donde se aplica la guarda de fórmulas. `None` sale como cadena vacía: vacío
+    es vacío, nunca la palabra "None" en una celda.
+    """
+    if valor is None:
+        return ""
+    if isinstance(valor, datetime):
+        return valor.strftime("%Y-%m-%d %H:%M")
+    if isinstance(valor, date):
+        return valor.strftime("%Y-%m-%d")
+    if isinstance(valor, bool):          # antes que int: bool ES int en Python
+        return "Sí" if valor else "No"
+    if isinstance(valor, int):
+        return str(valor)
+    return tabular.neutralizar_csv(str(valor), incidencias)
 
 
-def build_report(fmt: str) -> Tuple[Union[bytes, dict], str, str]:
+def build_csv(enriched: List[Dict[str, Any]],
+              sep: Optional[str] = None) -> bytes:
+    """El CSV, como CSV: RFC 4180 con BOM.
+
+    Tres decisiones, todas medidas contra el problema real (ver `config.CSV_SEP`):
+
+      - **BOM UTF-8**. Sin él Excel interpreta el fichero en la codificación
+        ANSI del sistema y destroza acentos y cirílico. Los lectores estándar
+        lo saltan solo (`encoding="utf-8-sig"`).
+      - **`\\r\\n`** como terminación de línea, que es lo que manda el estándar.
+      - **Coma** por defecto, con `sep` para pedir otra cosa. No se emite la
+        línea `sep=;` de Microsoft: añade una fila espuria a cualquier parser
+        estándar y el fichero deja de ser un CSV para todo lo que no sea Excel.
+
+    Las columnas y las traducciones salen de `tabular`, así que son las mismas
+    que las del XLSX por construcción.
+    """
+    delim = sep or config.CSV_SEP
+    incidencias = tabular.Incidencias()
+    filas = tabular.proyectar(enriched, incidencias)
+
+    out = io.StringIO(newline="")
+    w = _csv.writer(out, delimiter=delim, quotechar='"',
+                    quoting=_csv.QUOTE_MINIMAL, lineterminator="\r\n")
+    w.writerow(list(tabular.TITULOS))
+    for fila in filas:
+        w.writerow([_celda_csv(fila.get(c.clave), incidencias)
+                    for c in tabular.COLUMNAS])
+    return codecs.BOM_UTF8 + out.getvalue().encode("utf-8")
+
+
+def build_report(fmt: str, sep: Optional[str] = None
+                 ) -> Tuple[Union[bytes, dict], str, str]:
     """Construye el informe en el formato pedido.
 
     Devuelve `(contenido, media_type, suggested_filename)`. El contenido
-    es `bytes` para csv/pdf y `dict` para json (más fácil de manipular
+    es `bytes` para csv/xlsx/pdf y `dict` para json (más fácil de manipular
     desde el caller; quien lo necesite serializado puede `json.dumps`).
+
+    `sep` solo afecta al CSV; los demás formatos lo ignoran.
     """
     fmt = (fmt or "json").lower()
-    if fmt not in ("json", "csv", "pdf"):
-        raise ValueError(f"formato no soportado: {fmt!r}")
+    if fmt not in FORMATOS:
+        raise ValueError(f"formato no soportado: {fmt!r} "
+                         f"(usa uno de: {', '.join(FORMATOS)})")
 
     enriched, now = _enrich_rows()
     ts = _t.strftime("%Y%m%d-%H%M%S", _t.gmtime(now))
 
     if fmt == "csv":
-        out = io.StringIO()
-        w = _csv.DictWriter(out, fieldnames=_CSV_COLS, extrasaction="ignore")
-        w.writeheader()
-        for r in enriched:
-            w.writerow(r)
         return (
-            out.getvalue().encode("utf-8"),
+            build_csv(enriched, sep),
             "text/csv; charset=utf-8",
             f"rastrillo-{ts}.csv",
         )
 
     summary, by_action = _summary(enriched)
+
+    if fmt == "xlsx":
+        # Import perezoso, como el del PDF: openpyxl solo hace falta para este
+        # formato, así que si faltara no puede tumbar a los otros tres.
+        try:
+            from . import report_xlsx
+        except ImportError as e:      # pragma: no cover — depende del entorno
+            raise ValueError(
+                "el formato xlsx necesita openpyxl y no está instalado "
+                f"({e}). Instálalo con `pip install openpyxl` o usa "
+                "--format csv") from e
+        data = report_xlsx.render_xlsx(
+            accounts=enriched,
+            summary=summary,
+            audit_summary=by_action,
+            generated_at=now,
+        )
+        return data, MEDIA_XLSX, f"rastrillo-{ts}.xlsx"
 
     if fmt == "pdf":
         from . import report_pdf

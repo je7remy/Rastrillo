@@ -8,7 +8,72 @@ y el proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-Nada todavía.
+### Added
+
+- **Formato XLSX para el informe** (Paso 6, Entrega 2). `report --format xlsx
+  --out FILE`, `GET /api/report?format=xlsx` y un botón "Excel" en el
+  dashboard, por el mismo camino autenticado que arregló el Paso 5 (`fetch`
+  con token → `Blob` → enlace local; **cero anclas**). Tres hojas: **Resumen**
+  (totales, distribución por estado / confianza / verificabilidad, recuento del
+  audit log y las notas del informe), **Cuentas** (una fila por cuenta, con las
+  mismas columnas que el CSV, cabecera congelada, autofiltro, anchos medidos
+  sobre el contenido, fechas como fechas, números sumables y URLs como
+  hipervínculos) y **Glosario** (los mismos textos que el anexo del PDF, leídos
+  de `static/app.js` en tiempo de render). Ningún dato depende del color: la
+  cabecera se distingue por peso y estado, confianza y verificabilidad se
+  escriben siempre como palabras, así que en blanco y negro se lee igual.
+- **`rastrillo/tabular.py`**: la definición ÚNICA de la exportación tabular.
+  Una sola lista de columnas y una sola ruta de traducción para CSV y XLSX, con
+  un test de paridad que exige que las dos cabeceras coincidan. Aloja también
+  las guardas compartidas (fórmulas, recortes, nombres de hoja).
+- **`rastrillo/report_xlsx.py`**: el renderizador, con import perezoso de
+  openpyxl para que su ausencia solo afecte a `format=xlsx`.
+- `openpyxl` pasa a ser una dependencia **declarada** en `pyproject.toml` y
+  `requirements.txt`. Ya estaba instalada como transitiva de
+  `sherlock-project`, pero depender por accidente de la dependencia de otro es
+  frágil. **El pin de `requirements.lock` no cambia** (`openpyxl==3.1.5`) y el
+  fichero no se regenera.
+- `RASTRILLO_CSV_SEP` y `--sep` / `?sep=`: separador del CSV.
+- `tests/test_exportacion_tabular.py`: la suite pasa de 540 a **589 tests**.
+
+### Changed
+
+- **El CSV se reescribió para que sea legible** (Paso 6, Entrega 1). El
+  problema medido no era que hubiera demasiados datos —17 filas, 294 caracteres
+  la línea más larga— sino el separador: Excel usa el de la configuración
+  regional y no el del fichero, así que en es-ES una fila de comas cae entera en
+  la columna A. Ahora lleva **BOM UTF-8** (sin él Excel destroza acentos y
+  cirílico), terminaciones `\r\n`, **cabeceras en español** (`deletion_eta` →
+  "Fecha límite de eliminación"), valores traducidos con las mismas cadenas que
+  usa la UI, fechas legibles en vez de timestamps, y las columnas ordenadas para
+  leerse: identificación → estado → detalle → brecha. Perfil y baja son dos
+  columnas distintas y etiquetadas. Nada de `None` en una celda.
+
+  Se mantiene la **coma** por defecto (RFC 4180): el fichero para mirar es el
+  XLSX, así que el CSV se queda como formato de intercambio limpio. Quien lo
+  necesite con punto y coma lo pide por `RASTRILLO_CSV_SEP`, `--sep` o `?sep=`.
+  No se emite la línea `sep=;` de Microsoft, que añadiría una fila espuria a
+  cualquier parser estándar.
+- Se añaden columnas que el CSV nunca tuvo: verificabilidad, señales de
+  confianza (`confidence_reasons` como etiquetas legibles, **nunca el JSON**),
+  el plazo de eliminación, y el detalle de la brecha (`breach_meta`) repartido
+  en cuatro columnas propias.
+- `build_report(fmt)` pasa a `build_report(fmt, sep=None)`; desaparece
+  `reports._CSV_COLS`. Los contratos de `json` y `pdf` no cambian.
+- `glosario._cuerpo_del_objeto` tolera espacios alrededor del `=`. Con el ancla
+  literal anterior, `const DATA_CLASSES_ES = {` parecía un objeto ausente.
+
+### Security
+
+- **Neutralización de la inyección de fórmulas** en CSV y XLSX. Una celda que
+  empieza por `=`, `+`, `-` o `@` la ejecutan Excel y LibreOffice al abrir el
+  fichero, y en Rastrillo el `display_name` y el nombre del sitio vienen de
+  páginas ajenas: un nombre de perfil malicioso se convertía en código en la
+  máquina de quien abriera su propio informe. La detección es única y
+  contempla los prefijos precedidos de espacio, tabulador o retorno de carro.
+  En XLSX se fuerza el tipo de celda a texto —el valor queda byte-idéntico— y
+  en CSV, que no tiene tipos, se prefija un apóstrofo visible y reversible. Lo
+  que se toca se cuenta y el XLSX lo declara en su resumen.
 
 ## [0.1.0] - 2026-07-31
 

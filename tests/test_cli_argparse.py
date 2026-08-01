@@ -62,10 +62,23 @@ class TestCLIParser(IsolatedTestCase):
         self.assertIs(args.func, self.cli.cmd_report)
 
     def test_report_format_invalido_falla(self):
-        """argparse rechaza formatos fuera de json/csv/pdf con SystemExit."""
+        """argparse rechaza formatos fuera de json/csv/xlsx/pdf con SystemExit.
+
+        `xlsx` se sumó en el Paso 6; antes las opciones eran json/csv/pdf.
+        """
         p = self.cli.build_parser()
         with self.assertRaises(SystemExit):
             p.parse_args(["report", "--format", "yaml", "--out", "x"])
+
+    def test_report_acepta_xlsx_y_sep(self):
+        """El formato nuevo y el separador del CSV (Paso 6)."""
+        p = self.cli.build_parser()
+        args = p.parse_args(["report", "--format", "xlsx", "--out", "x.xlsx"])
+        self.assertEqual(args.format, "xlsx")
+        self.assertIsNone(args.sep)     # `--sep` es opcional
+        args = p.parse_args(["report", "--format", "csv", "--out", "x.csv",
+                             "--sep", ";"])
+        self.assertEqual(args.sep, ";")
 
     def test_report_sin_out_falla(self):
         p = self.cli.build_parser()

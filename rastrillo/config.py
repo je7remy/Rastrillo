@@ -57,6 +57,33 @@ def set_dry_run(enabled: bool) -> None:
     DRY_RUN = bool(enabled)
 
 
+# ── Separador del CSV (Paso 6) ──────────────────────────────────────────────
+# Por defecto la coma, que es lo que dice RFC 4180 y lo que espera cualquier
+# herramienta (pandas, R, awk, csvkit). El problema es que Excel NO usa el
+# separador del fichero sino el de la configuración regional: en es-ES es el
+# punto y coma, así que una fila de comas cae entera en la columna A. Ese es
+# el famoso "se ve todo apilado".
+#
+# La solución NO es cambiar el default —eso rompería el fichero para todos los
+# demás lectores— ni meter la línea `sep=;` de Microsoft, que ensucia el
+# fichero y añade una fila espuria a cualquier parser estándar. Es que el
+# formato bonito sea OTRO fichero: para eso está el XLSX, que se abre bien sin
+# configurar nada. Quien aun así quiera el CSV con punto y coma, lo pide.
+def _leer_csv_sep() -> str:
+    """Separador del CSV. Un solo carácter; si no, se avisa y se usa la coma."""
+    bruto = os.environ.get("RASTRILLO_CSV_SEP")
+    if not bruto:
+        return ","
+    if len(bruto) != 1:
+        print(f"aviso: RASTRILLO_CSV_SEP={bruto!r} no es un solo carácter; "
+              f"uso la coma")
+        return ","
+    return bruto
+
+
+CSV_SEP: str = _leer_csv_sep()
+
+
 # ── Onboarding (panel de bienvenida) ────────────────────────────────────────
 # Marker en disco: si el archivo existe, ya pasó por el panel de bienvenida.
 ONBOARDED_PATH = BASE_DIR / "onboarded.json"

@@ -903,12 +903,17 @@ def api_clear_accounts():
 
 # --- Informe / export -------------------------------------------------------
 @app.get("/api/report")
-def api_report(format: str = "json"):
+def api_report(format: str = "json", sep: str = None):
     """Genera un informe completo de la sesión actual.
 
     format=json (default) → JSON con cuentas + resumen.
-    format=csv             → CSV con una fila por cuenta.
+    format=csv             → CSV con una fila por cuenta (para procesar).
+    format=xlsx            → hoja de cálculo con resumen, detalle y glosario.
     format=pdf             → PDF con tablas y resumen.
+
+    `sep` solo aplica al CSV: cambia el separador de columnas (por defecto la
+    coma de RFC 4180). Existe porque Excel usa el separador de la configuración
+    regional y no el del fichero; ver `config.CSV_SEP`.
 
     No incluye el cuerpo completo de los correos para no inflar el archivo;
     incluye sí los destinatarios y asuntos. La consulta completa al audit
@@ -919,7 +924,7 @@ def api_report(format: str = "json"):
     from . import reports
 
     try:
-        content, media_type, filename = reports.build_report(format)
+        content, media_type, filename = reports.build_report(format, sep)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

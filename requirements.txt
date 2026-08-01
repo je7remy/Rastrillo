@@ -10,5 +10,6 @@ sherlock-project>=0.15.0
 holehe>=1.61
 anthropic>=0.30        # opcional: solo para el modo IA de respaldo
 reportlab>=4.0         # generación de PDF para el informe
+openpyxl>=3.1          # generación de XLSX para el informe (ya venía vía sherlock)
 dnspython>=2.6         # DNS (MX/NS/TXT) del módulo Domain Intelligence
 # maigret              # opcional — amplía cobertura del scan; pip install maigret para activar

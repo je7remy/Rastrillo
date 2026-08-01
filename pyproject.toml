@@ -20,6 +20,13 @@ dependencies = [
     # anthropic es opcional: solo se usa para el modo IA de respaldo.
     "anthropic>=0.30",
     "reportlab>=4.0",
+    # openpyxl: informe XLSX (Paso 6). YA venía instalada como dependencia
+    # transitiva de sherlock-project, pero se declara explícitamente: depender
+    # por accidente de la dependencia de otro es frágil — el día que Sherlock
+    # la quite, Rastrillo se rompe sin haber cambiado nada.
+    # OJO: esto NO cambia el pin de requirements.lock (openpyxl==3.1.5). Ver
+    # la nota sobre el lock en CLAUDE.md antes de regenerarlo.
+    "openpyxl>=3.1",
     # dnspython: única dep del módulo Domain Intelligence. La stdlib no
     # resuelve MX/NS/TXT; ver justificación en rastrillo/domain_intel.py.
     "dnspython>=2.6",

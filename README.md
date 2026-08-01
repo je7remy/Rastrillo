@@ -64,7 +64,7 @@
 - ⏳ **Eliminación programada** — registra el plazo que da la plataforma ("en 30 días"), con cuenta regresiva, fecha final y barra de progreso. Al vencer no marca nada solo: ofrece **Verificar**.
 - 💾 **Resumible** — `current_step` y hash de receta persistidos, audit log append-only, backup de DB antes de borrados masivos.
 - 🧪 **Modo simulación** — flujo completo sin disparar la acción destructiva final.
-- 📤 **Informe exportable** — JSON y CSV para procesar, y un **PDF pensado para archivar o imprimir**: portada con el alcance y los totales, resumen por estado y confianza, detalle por cuenta y un anexo que explica qué significa cada señal. Ningún dato depende del color, así que se lee igual en blanco y negro.
+- 📤 **Informe exportable en cuatro formatos** — **JSON y CSV para procesar**, **XLSX para mirar** (resumen, detalle con cabecera congelada y autofiltro, y glosario; fechas que son fechas y números sumables) y un **PDF pensado para archivar o imprimir**: portada con el alcance y los totales, resumen por estado y confianza, detalle por cuenta y un anexo que explica qué significa cada señal. Ni el PDF ni el XLSX codifican ningún dato en color, así que se leen igual en blanco y negro.
 - 🌐 **Inteligencia de dominio** — WHOIS + DNS (A/MX/NS/TXT) + correlación heurística de proveedores, para tu propia infraestructura o la que tienes permiso de auditar.
 
 ---
@@ -311,10 +311,23 @@ Tareas sin abrir UI (debug, scripts, automatización):
 ```bash
 ./rastrillo.sh scan --user je7remy --email tu@correo.com   # discovery headless
 ./rastrillo.sh list [--status STATUS]                      # lista la DB
-./rastrillo.sh report --format json|csv|pdf --out FILE     # exporta informe
+./rastrillo.sh report --format json|csv|xlsx|pdf --out FILE # exporta informe
 ./rastrillo.sh canario https://sitio.com/u/je7remy         # ¿el sitio verifica usuarios?
 ./rastrillo.sh reparar-confianza [--aplicar]               # mantenimiento de un solo uso
 ```
+
+**Qué formato usar.** El **CSV es para procesar** (pandas, R, una hoja que
+importes en otro sitio): RFC 4180, coma, sin adornos. El **XLSX es para mirar**:
+se abre bien de un doble clic, con filtros y tipos de verdad. Si abres el CSV en
+un Excel de configuración regional europea y te apila la fila entera en la
+columna A, es porque Excel usa el separador de tu sistema (`;`) y no el del
+fichero. Tienes dos salidas: usar el XLSX, o pedir el CSV con punto y coma —
+`--sep ';'`, o `RASTRILLO_CSV_SEP=';'` para que sea permanente.
+
+Los dos llevan la misma neutralización de fórmulas: un nombre de perfil que
+empiece por `=`, `+`, `-` o `@` viene de una página ajena y Excel lo ejecutaría
+al abrir el fichero, así que se escribe como texto (en el CSV, con un apóstrofo
+delante que puedes quitar).
 
 Sobre el PDF y las tildes: **Rastrillo no empaqueta ninguna fuente.** Al generar
 el informe busca una del sistema con cobertura amplia (DejaVu, Liberation, Noto,
@@ -457,7 +470,9 @@ rastrillo/
 │   ├── report_pdf.py       # El informe PDF (portada/resumen/detalle/anexo)
 │   ├── pdf_fuentes.py      # Fuente del PDF + degradación visible de Unicode
 │   ├── glosario.py         # Etiquetas y textos compartidos con el dashboard
-│   ├── reports.py          # Construcción de informes (json/csv/pdf)
+│   ├── reports.py          # Construcción de informes (json/csv/xlsx/pdf)
+│   ├── tabular.py          # Columnas y guardas comunes a CSV y XLSX
+│   ├── report_xlsx.py      # El informe XLSX (resumen/cuentas/glosario)
 │   ├── recipes/            # Recetas de ejemplo
 │   └── static/             # Frontend (index.html + css + js)
 │
@@ -489,6 +504,7 @@ Las 21 reales del código:
 | `RASTRILLO_ALLOWED_HOSTS` | `127.0.0.1:8765,localhost:8765,testserver` | Hosts permitidos en el header `Host` (anti DNS rebinding) |
 | `RASTRILLO_ALLOW_QUERY_TOKEN` | off | **Solo tests.** Acepta `?token=` en la query |
 | `RASTRILLO_DRY_RUN` | off | Modo simulación al arrancar |
+| `RASTRILLO_CSV_SEP` | `,` | Separador del CSV. Pon `;` si tu Excel te apila la fila en una columna (o usa el XLSX) |
 | `ANTHROPIC_API_KEY` | — | Activa agente IA + web search |
 | `RASTRILLO_AI_MODEL` | `claude-sonnet-4-6` | Modelo de Anthropic |
 | `RASTRILLO_AI_TOKEN_BUDGET` | `8000` | Presupuesto de tokens por bucle del agente IA |

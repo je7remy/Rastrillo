@@ -84,12 +84,25 @@ class TestContentTypes(_BaseInforme):
                          "format=pdf respondió un cuerpo JSON")
 
     def test_csv_devuelve_csv(self):
+        """La cabecera cambió en el Paso 6, y a propósito.
+
+        Antes se afirmaba `startswith(b"id,platform,")`: nombres de columna de
+        la base de datos y sin BOM. Ahora el CSV empieza por el BOM UTF-8 (sin
+        él Excel destroza acentos y cirílico) y las cabeceras están en español.
+        No es una regresión: es el contenido de la Entrega 1.
+        """
+        import codecs
         self._alta()
         r = self.cli.get("/api/report?format=csv", headers=self.hdr())
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.headers["content-type"].startswith("text/csv"))
-        self.assertTrue(r.content.startswith(b"id,platform,"),
-                        f"cabecera CSV inesperada: {r.content[:60]!r}")
+        self.assertTrue(r.content.startswith(codecs.BOM_UTF8),
+                        f"el CSV no empieza por el BOM: {r.content[:12]!r}")
+        cabecera = r.content.decode("utf-8-sig").splitlines()[0]
+        self.assertTrue(cabecera.startswith("id,"),
+                        f"cabecera CSV inesperada: {cabecera[:80]!r}")
+        for titulo in ("Sitio", "Identificador", "Estado", "Confianza"):
+            self.assertIn(titulo, cabecera)
 
     def test_json_devuelve_json(self):
         self._alta()

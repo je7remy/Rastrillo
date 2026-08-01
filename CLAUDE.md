@@ -59,6 +59,16 @@ principalmente en Arch/Hyprland pero también corre en Windows y Mac.
    que puedas tomarte por tu cuenta. Instalar DESDE el lock
    (`pip install -r requirements.lock`) no lo modifica y es siempre correcto.
 
+   **Anotación desfasada a propósito** (Paso 6): `openpyxl==3.1.5` está en el
+   lock con el comentario `# via sherlock-project`, pero desde el Paso 6
+   Rastrillo también la declara directamente en `pyproject.toml` y en
+   `requirements.txt` — el informe XLSX la usa, y depender por accidente de la
+   dependencia de otro es frágil (si Sherlock la quitara, Rastrillo se rompería
+   sin haber cambiado nada). Declararla **no cambia el pin**, solo esa línea de
+   comentario, que se actualizaría sola si alguien regenerase el lock. Como no
+   se regenera, la anotación se queda desfasada. Eso NO es un motivo para
+   regenerarlo.
+
 ## Modelo de borrado: resolver en capas
 
 Para cada cuenta el resolver prueba las capas en orden y se queda con la
@@ -87,7 +97,9 @@ con la plantilla GDPR estática en uno de los 6 idiomas soportados.
 ## Mapa del código
 
 `cli.py` — entrypoint. Sin argumentos arranca el dashboard, abre el
-navegador con el token en la URL y queda corriendo. Subcomandos `list`,
+navegador con el token en la URL y queda corriendo. `report --format
+json|csv|xlsx|pdf --out FILE` exporta (con `--sep` para el separador del CSV).
+Subcomandos `list`,
 `run`, `canario` y `reparar-confianza` son auxiliares de debug/mantenimiento. `rastrillo canario URL|HOST
 [--user U] [--token T --token T]` corre el canario contra UN sitio y vuelca
 la evidencia cruda (status de cada falso, bytes, marcadores, similitud,
@@ -399,7 +411,7 @@ barrería el descarte masivo; alimenta el conteo exacto del modal),
 `POST /api/accounts/clear`,
 `GET/POST /api/dry-run`,
 `GET /api/onboarding`, `POST /api/onboarding/dismiss`,
-`GET /api/report?format=json|csv|pdf` (ver aviso abajo),
+`GET /api/report?format=json|csv|xlsx|pdf[&sep=;]` (ver aviso abajo),
 `GET /api/accounts/{id}/followup-draft`.
 
 **La descarga de informes NO puede ir por un `<a href download>`** (Paso 5).
@@ -412,7 +424,9 @@ botones llaman a `descargarInforme()` en `app.js`: fetch con token → `Blob` �
 enlace local, y un error se muestra como aviso en vez de guardarse como
 fichero. `tests/test_informe_http.py` cubre el transporte y **rechaza cualquier
 `<a>` que apunte a `/api/report`** en el HTML. No se arregla relajando la auth:
-ni token por query, ni excepciones de ruta en el middleware.
+ni token por query, ni excepciones de ruta en el middleware. El botón de XLSX
+del Paso 6 va por ese mismo camino (`descargarInforme("xlsx")`), no por un
+ancla nueva.
 
 Lección de por qué se coló: la única prueba de informes que había llamaba a
 `reports.build_report()` **directamente**. Se probaba el generador y nunca el
@@ -437,11 +451,69 @@ snapshot reducido de cada acción destructiva (delete, anonymize,
 mark-sent, own, discard, confirm-account). Rota a `audit_<ts>.json`
 cuando supera `RASTRILLO_AUDIT_MAX_BYTES` (default 5 MB).
 
-`rastrillo/reports.py` — construcción de informes en JSON / CSV / PDF.
-`build_report(fmt)` devuelve `(contenido, media_type, nombre_sugerido)` y lo
-comparten el endpoint `GET /api/report` y el subcomando `report`, para que
-produzcan lo mismo. Los formatos `json` y `csv` (`_CSV_COLS`) son contrato:
-no se tocan.
+`rastrillo/reports.py` — construcción de informes en JSON / CSV / XLSX / PDF.
+`build_report(fmt, sep=None)` devuelve `(contenido, media_type,
+nombre_sugerido)` y lo comparten el endpoint `GET /api/report` y el subcomando
+`report`, para que produzcan lo mismo. El formato `json` es contrato: no se
+toca. **El `csv` SÍ cambió en el Paso 6** (antes esta línea decía que tampoco;
+la lista `_CSV_COLS` ya no existe) — ver `tabular.py`.
+
+El reparto de papeles entre los dos formatos tabulares es la decisión del paso:
+**el CSV es para procesar y el XLSX es para mirar.** El CSV no admite formato
+—no tiene tipografía, ni anchos, ni tipos de celda— así que intentar que fuera
+también el fichero bonito es lo que lo tenía ilegible. `sep` solo afecta al CSV.
+
+`rastrillo/tabular.py` — **la definición ÚNICA de la exportación tabular**
+(Paso 6). `COLUMNAS` (orden identificación → estado → detalle → brecha),
+`proyectar()` (valores ya traducidos y TIPADOS: `datetime` para fechas, `int`
+para números, `None` para vacío), y las guardas: `empieza_por_formula`,
+`neutralizar_csv`, `recortar`, `nombre_hoja`, `limpiar_control`. CSV y XLSX
+consumen esto y nada más, así que enseñan lo mismo por construcción; hay un
+test de paridad que compara las dos cabeceras.
+
+Este módulo NO decide el formato final de un valor: eso es de cada
+renderizador. Meter aquí un `strftime` obligaría al XLSX a re-parsear la fecha
+para escribirla como fecha, que es justo lo que hace que Excel no la pueda
+ordenar.
+
+Las traducciones salen de `glosario.py` y de ningún otro sitio. `proyectar`
+también convierte los campos JSON: `confidence_reasons` → etiquetas separadas
+por ` · `, y `breach_meta` → **cuatro columnas propias**. Un `{"code": ...}`
+dentro de una celda es ilegible y además rompe el parseo de quien lea el
+fichero.
+
+**Inyección de fórmulas.** Si una celda empieza por `=`, `+`, `-` o `@`, Excel
+y LibreOffice la ejecutan al abrir el fichero, y `display_name` y el nombre del
+sitio vienen de páginas ajenas. La DETECCIÓN es única; el remedio, el que cada
+formato permite: en XLSX se fuerza `celda.data_type = "s"` (el valor queda
+byte-idéntico, cero alteración), y en CSV —que no tiene tipos— se prefija un
+apóstrofo, visible y reversible con `lstrip("'")`. Se cuenta lo que se toca:
+`Incidencias` lo lleva y el XLSX lo declara en su hoja de resumen.
+
+`rastrillo/report_xlsx.py` — el informe XLSX (openpyxl). Import **perezoso**
+desde `reports.py`, como el del PDF: si openpyxl faltara, solo falla
+`format=xlsx` y los otros tres formatos siguen. Tres hojas: **Resumen**
+(totales, distribuciones, notas), **Cuentas** (una fila por cuenta, las
+columnas del CSV, cabecera congelada y autofiltro) y **Glosario** (los mismos
+textos que el anexo del PDF, leídos de `app.js` en tiempo de render).
+
+No hay una hoja por estado ni una hoja de brechas aparte: las pestañas del
+dashboard son filtros sobre la misma tabla y el autofiltro las reproduce sin
+duplicar filas.
+
+Mismos criterios que el PDF, y por lo mismo: **ningún dato depende del color**
+(estado, confianza y verificabilidad siempre en palabras; la cabecera se
+distingue por PESO, no por un bloque saturado), **perfil y baja son columnas
+separadas y etiquetadas**, y nada de `None` impreso. `MAX_ALCANCE` es el mismo
+tope que en `report_pdf` y por la misma razón — enumerar 300 identificadores no
+informa; allí además reventaba el layout.
+
+Lo que openpyxl 3.1.5 **no** protege, medido, y por eso lo hacemos nosotros:
+una celda de 40.000 caracteres **se guarda sin avisar** (es Excel quien luego
+rechaza el fichero); un título de hoja de más de 31 caracteres solo emite un
+`UserWarning` y se conserva; y una cadena que empieza por `=` se convierte en
+fórmula sola. En cambio sí lanza ante `[ ] : * ? / \` en un nombre de hoja y
+ante caracteres de control en una celda.
 
 Aquí vive también `deletion_url(action_meta, profile_url)`, que bajó de
 `server.py` en el Paso 4 porque la necesitan DOS consumidores —el endpoint
@@ -515,6 +587,22 @@ el PDF los necesita y no puede importar `server` (arrastraría FastAPI y, vía
 `jobs`, la cadena de Playwright, para generar un fichero). `server` los
 reexporta con su nombre de siempre, así que `_boot_script` y los tests no
 cambian.
+
+Desde el Paso 6 aloja también `TIPO_BAJA_META`, `DIFICULTAD_META` y `VIA_META`
+(tres ejes que la UI no pinta pero que sí salen en el CSV y el XLSX, donde un
+`unknown` o un `semi_auto` en una celda no significan nada), y
+`clases_de_datos()` / `etiqueta_clase_datos()`, que leen `DATA_CLASSES_ES` de
+`app.js` para traducir las categorías de una brecha. Ese objeto tiene las
+claves ENTRECOMILLADAS, así que no lo parsea `_parsear_objeto` —que exige una
+clave desnuda— sino un parser hermano. Y **no está en `_OBJETOS`** a propósito:
+si estuviera y faltara, `cargar_textos()` devolvería `{}` y dejaría al anexo
+del PDF sin glosario por un fallo que no tiene nada que ver con él. Los valores
+desconocidos se dejan pasar crudos en los cuatro casos: traducir a ojo lo que
+no conocemos sería inventarse el dato.
+
+`_cuerpo_del_objeto` tolera espacios alrededor del `=` (`const X = {` y
+`const X={`). `app.js` está escrito a mano y no los pone igual en todas partes;
+con el ancla literal que había antes, un objeto que existe parecía ausente.
 
 Y sobre todo: **el anexo del PDF lee las explicaciones de `static/app.js`**, en
 tiempo de render. No es una copia sincronizada por un test, es literalmente la
@@ -728,6 +816,31 @@ Archivos:
   explícito de que un `format=pdf` **no puede** responder JSON, el
   `Content-Disposition`, el 401 sin token que no filtra ni PDF ni datos, y un
   barrido del HTML que rechaza cualquier `<a href>` a `/api/report`.
+- `tests/test_exportacion_tabular.py` — Paso 6: CSV y XLSX. Del CSV: BOM y
+  `\r\n`, round-trip con el `csv` de stdlib (con los dos separadores), un valor
+  con separador + comillas + salto que vuelve idéntico, cirílico y acentos,
+  **ninguna celda con JSON crudo** (y `breach_meta` como columnas propias), DB
+  vacía → solo cabecera, fechas legibles en vez de timestamps, estados
+  traducidos, y que no se emita la línea `sep=` de Microsoft. Del XLSX: las tres
+  hojas, fechas que son `datetime` y números que son `int` sumables, cabecera
+  congelada + autofiltro, DB vacía, 300 filas con tope de tiempo, nulos y
+  cadenas patológicas, hipervínculos, anchos distintos, y que el glosario salga
+  de `app.js`. Más un bloque de **paridad** que exige que las columnas del CSV y
+  las de la hoja «Cuentas» sean idénticas.
+
+  Y el bloque que no es opcional: **inyección de fórmulas**. Los cuatro
+  prefijos, incluidos los precedidos de tabulador, retorno de carro y espacio,
+  en los dos formatos; que un valor inocente no se ensucie; y un **barrido que
+  envenena TODAS las columnas de texto a la vez** y falla si alguna deja pasar
+  el valor sin neutralizar — probar solo el campo que se nos ocurrió deja la
+  puerta abierta a la siguiente columna que alguien añada. Más los límites:
+  40.000 caracteres recortados de forma visible, `recortar` respetando el tope
+  exacto, nombres de hoja saneados, y que lo que devuelve `nombre_hoja` nunca
+  haga estallar a openpyxl.
+
+  El «Alcance» del resumen tiene su propia regresión, la misma que el
+  `MAX_ALCANCE` del PDF: con 300 cuentas enumeraba los 300 identificadores en
+  una celda. Con nombres cortos no se nota.
 - `tests/test_netguard.py` — Paso 5: el criterio anti-SSRF único. El predicado
   por familias de IP, los dos envoltorios, que basta UNA dirección no pública
   para rechazar (un host que resuelve a pública + loopback), que el esquema se
@@ -773,7 +886,7 @@ Archivos:
   Se verificó que sin el tope revienta con `LayoutError`; con nombres cortos
   el caso quedaba a un 5% del límite y pasaba desapercibido.
 
-Alrededor de 540 tests en poco más de dos minutos. Antes de cualquier cambio
+589 tests en poco más de dos minutos y medio. Antes de cualquier cambio
 importante: corre la suite.
 
 ## Cómo probar sin tocar sitios reales
@@ -791,6 +904,7 @@ Eso es lo que hace `test_engine_html_local.py`.
 | `RASTRILLO_ALLOWED_HOSTS` | `127.0.0.1:8765,localhost:8765,testserver` | Hosts permitidos en el header `Host` (anti DNS rebinding) |
 | `RASTRILLO_ALLOW_QUERY_TOKEN` | off | **Solo para tests.** Acepta `?token=` en la query. En producción el token solo viaja por header `X-Rastrillo-Token`. |
 | `RASTRILLO_DRY_RUN` | off | Simulación al arrancar |
+| `RASTRILLO_CSV_SEP` | `,` | Separador del CSV. Por defecto la coma (RFC 4180). Pon `;` si tu Excel es de configuración regional europea y te apila la fila entera en la columna A — o mejor, usa el XLSX, que se abre bien sin configurar nada |
 | `ANTHROPIC_API_KEY` | — | Activa agente IA y web search |
 | `RASTRILLO_AI_MODEL` | `claude-sonnet-4-6` | Modelo de Anthropic |
 | `RASTRILLO_HIBP_API_KEY` | — | Activa discovery por HIBP |
@@ -816,7 +930,8 @@ romperán cuando los sitios cambien su HTML. La suite de tests cubre los
 invariantes críticos: dedup, capas del resolver, plantillas GDPR,
 transiciones de estado, degradación sin IA, motor con HTML local,
 onboarding, pool y throttle, ops (backup/rotación/refresh), maigret,
-HIBP-como-exposición y anti-falso-deleted.
+HIBP-como-exposición, anti-falso-deleted y la exportación tabular (columnas
+compartidas CSV/XLSX, inyección de fórmulas y límites de Excel).
 
 ## Backlog
 
@@ -843,6 +958,14 @@ Cosas que se podrían apretar más:
   usuario no existe" de "el sitio se rompió". Es la semántica previa a 2C y se
   dejó intacta a propósito; merece revisión con evidencia.
 
+- **El XLSX no tiene hoja de brechas ni hoja por estado.** Se decidió que las
+  pestañas del dashboard son filtros sobre la misma tabla y que el autofiltro
+  las reproduce sin duplicar filas. Si algún día el contexto de brecha crece
+  (hoy son 4 columnas y en la DB real están vacías), una hoja propia tendría
+  sentido; `tabular.nombre_hoja` ya existe para eso.
+- **`\r` dentro de una celda sale como `\n` en el XLSX.** Lo normaliza el
+  formato, no nosotros. El dato sigue siendo el mismo salto de línea, así que se
+  documenta en vez de "arreglarse".
 - **El PDF no es byte-idéntico entre máquinas.** Depende de qué fuente haya
   instalada (ver `pdf_fuentes.py`). Es la contrapartida asumida al descartar
   embeber un binario en el repo. Si algún día se quiere salida reproducible,

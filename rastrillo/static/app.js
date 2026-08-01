@@ -1357,6 +1357,7 @@ $("dir-refresh").onclick=async()=>{
 /* Descarga de informes. Van por fetch+Blob para poder mandar el token; ver
  * `descargarInforme`. */
 $("report-csv-btn").onclick=(e)=>descargarInforme("csv", e.currentTarget);
+$("report-xlsx-btn").onclick=(e)=>descargarInforme("xlsx", e.currentTarget);
 $("report-pdf-btn").onclick=(e)=>descargarInforme("pdf", e.currentTarget);
 
 /* ── Domain Intelligence ──────────────────────────────────────
